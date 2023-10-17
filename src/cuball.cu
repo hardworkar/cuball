@@ -1,44 +1,53 @@
+#include <glad/glad.h>
+#include <GLFW/glfw3.h>
 #include <iostream>
-#include <math.h>
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
-// Kernel function to add the elements of two arrays
-__global__
-void add(int n, float* x, float* y)
-{
-    for (int i = 0; i < n; i++)
-        y[i] = x[i] + y[i];
-}
+void framebuffer_size_callback(GLFWwindow* window, int width, int height);
+void processInput(GLFWwindow *window);
 
-int main(void)
-{
-    int N = 1 << 20;
-    float* x, * y;
+const unsigned int SCR_WIDTH = 800;
+const unsigned int SCR_HEIGHT = 600;
 
-    // Allocate Unified Memory accessible from CPU or GPU
-    cudaMallocManaged(&x, N * sizeof(float));
-    cudaMallocManaged(&y, N * sizeof(float));
+int main() {
+    glfwInit();
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-    // initialize x and y arrays on the host
-    for (int i = 0; i < N; i++) {
-        x[i] = 1.0f;
-        y[i] = 2.0f;
+    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "LearnOpenGL", NULL, NULL);
+    if (window == NULL) {
+        std::cout << "Failed to create GLFW window" << std::endl;
+        glfwTerminate();
+        return -1;
     }
 
-    // Run kernel on 1M elements on the GPU
-    add << <1, 1 >> > (N, x, y);
+    glfwMakeContextCurrent(window);
+    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
 
-    // Wait for GPU to finish before accessing on host
-    cudaDeviceSynchronize();
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        std::cout << "Failed to initialize GLAD" << std::endl;
+        return -1;
+    }    
 
-    // Check for errors (all values should be 3.0f)
-    float maxError = 0.0f;
-    for (int i = 0; i < N; i++)
-        maxError = fmax(maxError, fabs(y[i] - 3.0f));
-    std::cout << "Max error: " << maxError << std::endl;
+    while (!glfwWindowShouldClose(window)) {
+        processInput(window);
+        glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glfwSwapBuffers(window);
+        glfwPollEvents();
+    }
 
-    // Free memory
-    cudaFree(x);
-    cudaFree(y);
-
+    glfwTerminate();
     return 0;
+}
+
+void processInput(GLFWwindow *window) {
+    if(glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        glfwSetWindowShouldClose(window, true);
+}
+
+void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
+    glViewport(0, 0, width, height);
 }
