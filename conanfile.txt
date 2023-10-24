@@ -2,6 +2,7 @@
 glfw/3.3.8
 glad/0.1.36
 glm/cci.20230113
+assimp/5.2.2
 
 [options]
 glad*:gl_profile=core
