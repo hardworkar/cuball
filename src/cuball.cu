@@ -23,6 +23,11 @@ glm::vec3 cameraTarget;
 
 glm::vec3 lightPos;
 
+// clang-format off
+#define CHECK(e) \
+do { if (!e) { fprintf(stderr, "! %s:%d\n", __FILE__, __LINE__); exit(-1); } } while (0)
+// clang-format on
+
 const char *vertexShaderSource =
     "#version 330 core\n"
     "layout (location = 0) in vec3 aPos;\n"
@@ -50,31 +55,28 @@ const char *fragmentShaderSource =
     "  float diff = max(0.0, dot(Normal, lightDir));\n"
     "  vec3 diffuse = diff * lightColor;\n"
     "  float ambientStrength = 0.5;\n"
-    "  vec3 ambient = vec3(0.0, 0.0, 0.0);//ambientStrength * lightColor;\n"
+    "  vec3 ambient = ambientStrength * lightColor;\n"
     "  FragColor = vec4(ambient + diffuse, 0.0);\n"
     "}\0";
 
-int main(int argc, char *argp[]) {
-  if (argc < 2) {
-    fprintf(stderr, "Provide a .stl model as an argument\n");
-    return -1;
-  }
-  Assimp::Importer importer;
-  const aiScene *scene =
-      importer.ReadFile(std::string(argp[1]),
-                        aiProcess_CalcTangentSpace | aiProcess_Triangulate |
-                            aiProcess_JoinIdenticalVertices |
-                            aiProcess_SortByPType | aiProcess_GenSmoothNormals);
+aiMesh *importModel(const std::string &iFilename) {
+  static Assimp::Importer importer;
+  const aiScene *scene = importer.ReadFile(
+      iFilename, aiProcess_CalcTangentSpace | aiProcess_Triangulate |
+                     aiProcess_JoinIdenticalVertices | aiProcess_SortByPType |
+                     aiProcess_GenSmoothNormals);
   if (!scene || scene->mNumMeshes != 1 || scene->mMeshes[0]->mNormals == NULL) {
-    fprintf(stderr, "Failed to import %s: %s\n", argp[1],
+    fprintf(stderr, "Failed to import %s: %s\n", iFilename.c_str(),
             importer.GetErrorString());
-    return -1;
+    return 0;
   }
-
   aiMesh *mesh = scene->mMeshes[0];
-  fprintf(stdout, "Loaded model '%s': faces: %d vertices: %d\n", argp[1],
-          mesh->mNumFaces, mesh->mNumVertices);
+  fprintf(stdout, "Loaded model '%s': faces: %d vertices: %d\n",
+          iFilename.c_str(), mesh->mNumFaces, mesh->mNumVertices);
+  return mesh;
+}
 
+GLFWwindow *initGLFW() {
   glfwInit();
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -85,7 +87,7 @@ int main(int argc, char *argp[]) {
   if (window == NULL) {
     fprintf(stderr, "Failed to create GLFW window\n");
     glfwTerminate();
-    return -1;
+    return NULL;
   }
 
   glfwMakeContextCurrent(window);
@@ -93,12 +95,16 @@ int main(int argc, char *argp[]) {
 
   if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
     fprintf(stderr, "Failed to initialize GLAD\n");
-    return -1;
+    return NULL;
   }
 
   glEnable(GL_DEPTH_TEST);
   glDepthFunc(GL_LESS);
 
+  return window;
+}
+
+unsigned int compileShader() {
   unsigned int vertexShader;
   vertexShader = glCreateShader(GL_VERTEX_SHADER);
   glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
@@ -139,6 +145,20 @@ int main(int argc, char *argp[]) {
   glDeleteShader(vertexShader);
   glDeleteShader(fragmentShader);
 
+  return shader;
+}
+
+int main(int argc, char *argp[]) {
+  CHECK(argc == 2);
+
+  aiMesh *mesh = importModel(std::string(argp[1]));
+  CHECK(mesh);
+
+  GLFWwindow *window = initGLFW();
+  CHECK(window);
+
+  unsigned int shader = compileShader();
+
   std::vector<float> vVertices;
   vVertices.reserve(mesh->mNumVertices * 3 * 2);
   for (int i = 0; i < mesh->mNumVertices; ++i) {
@@ -155,8 +175,8 @@ int main(int argc, char *argp[]) {
     for (auto j = 0; j < 3; ++j)
       vIndices.push_back(mesh->mFaces[i].mIndices[j]);
   }
-
   unsigned int *indices = vIndices.data();
+
   unsigned int VBO, VAO, EBO;
   glGenVertexArrays(1, &VAO);
   glGenBuffers(1, &VBO);
@@ -182,12 +202,14 @@ int main(int argc, char *argp[]) {
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   glBindVertexArray(0);
 
-  glm::mat4 projection;
-  projection = glm::perspective(glm::radians(60.0f),
-                                (float)SCR_WIDTH / SCR_HEIGHT, 0.1f, 1000.0f);
-  glm::mat4 model = glm::mat4(1.0);
+  glm::mat4 projection = glm::perspective(
+      glm::radians(60.0f), (float)SCR_WIDTH / SCR_HEIGHT, 0.1f, 1000.0f);
 
-  cameraPos = glm::vec3(0.0f, -100.0f, 43.0f);
+  std::vector<glm::mat4> models;
+  for (int i = 0; i < 3; ++i)
+    models.push_back(glm::mat4(1.0));
+
+  cameraPos = glm::vec3(0.0f, -130.0f, 43.0f);
   cameraTarget = glm::vec3(0.0f, 0.0f, 43.0f);
 
   lightPos = cameraPos;
@@ -197,31 +219,40 @@ int main(int argc, char *argp[]) {
     glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glUseProgram(shader);
-
-    model =
-        glm::rotate(glm::mat4(1.0), (float)glfwGetTime() * glm::radians(40.0f),
-                    glm::vec3(0.0f, 0.0f, 1.0f));
-
-    // camera stuff
     glm::vec3 cameraDirection = glm::normalize(cameraPos - cameraTarget);
     glm::vec3 up = glm::vec3(0.0f, 0.0f, 1.0f);
     glm::vec3 cameraRight = glm::normalize(glm::cross(up, cameraDirection));
     glm::vec3 cameraUp = glm::cross(cameraDirection, cameraRight);
     glm::mat4 view = glm::lookAt(cameraPos, cameraTarget, cameraUp);
 
-    glUniformMatrix4fv(glGetUniformLocation(shader, "projection"), 1, GL_FALSE,
-                       glm::value_ptr(projection));
-    glUniformMatrix4fv(glGetUniformLocation(shader, "view"), 1, GL_FALSE,
-                       glm::value_ptr(view));
-    glUniformMatrix4fv(glGetUniformLocation(shader, "model"), 1, GL_FALSE,
-                       glm::value_ptr(model));
+    std::vector<glm::vec3> translations = {
+        glm::vec3(0, 0, 0), glm::vec3(70, 0, 0), glm::vec3(-70, 0, 0)};
+    CHECK(translations.size() == models.size());
 
-    glUniform3fv(glGetUniformLocation(shader, "lightPos"), 1,
-                 glm::value_ptr(lightPos));
+    for (int i = 0; i < 3; ++i) {
+      glUseProgram(shader);
+      glUniformMatrix4fv(glGetUniformLocation(shader, "projection"), 1,
+                         GL_FALSE, glm::value_ptr(projection));
+      glUniformMatrix4fv(glGetUniformLocation(shader, "view"), 1, GL_FALSE,
+                         glm::value_ptr(view));
+
+      models[i] = glm::translate(glm::mat4(1.0), translations[i]) *
+                  glm::rotate(glm::mat4(1.0),
+                              (float)glfwGetTime() * glm::radians(40.0f),
+                              glm::vec3(0.0f, 0.0f, 1.0f));
+
+      glUniformMatrix4fv(glGetUniformLocation(shader, "model"), 1, GL_FALSE,
+                         glm::value_ptr(models[i]));
+      glUniform3fv(glGetUniformLocation(shader, "lightPos"), 1,
+                   glm::value_ptr(lightPos));
+
+      glBindVertexArray(VAO);
+      glDrawElements(GL_TRIANGLES, mesh->mNumFaces * 3, GL_UNSIGNED_INT, 0);
+    }
 
     glBindVertexArray(VAO);
     glDrawElements(GL_TRIANGLES, mesh->mNumFaces * 3, GL_UNSIGNED_INT, 0);
+
     glfwSwapBuffers(window);
     glfwPollEvents();
   }
@@ -236,16 +267,12 @@ void processInput(GLFWwindow *window) {
     glfwSetWindowShouldClose(window, true);
   float r = sqrt(cameraPos.x * cameraPos.x + cameraPos.y * cameraPos.y);
   float phi = atan2(cameraPos.y, cameraPos.x);
-  if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+  if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
     r -= 0.3;
-    cameraPos.x = r * cos(phi);
-    cameraPos.y = r * sin(phi);
-  }
-  if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+  if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
     r += 0.3;
-    cameraPos.x = r * cos(phi);
-    cameraPos.y = r * sin(phi);
-  }
+  cameraPos.x = r * cos(phi);
+  cameraPos.y = r * sin(phi);
 }
 
 void framebuffer_size_callback(GLFWwindow *window, int width, int height) {
