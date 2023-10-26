@@ -32,7 +32,7 @@ const char *vertexShaderSource =
     "#version 330 core\n"
     "layout (location = 0) in vec3 aPos;\n"
     "layout (location = 1) in vec3 aNormal;\n"
-    "uniform mat4 models[3];\n"
+    "uniform mat4 models[9];\n"
     "uniform mat4 view;\n"
     "uniform mat4 projection;\n"
     "out vec3 FragPos;\n"
@@ -206,14 +206,18 @@ int main(int argc, char *argp[]) {
   glm::mat4 projection = glm::perspective(
       glm::radians(60.0f), (float)SCR_WIDTH / SCR_HEIGHT, 0.1f, 1000.0f);
 
-  std::vector<glm::mat4> models;
-  for (int i = 0; i < 3; ++i)
-    models.push_back(glm::mat4(1.0));
-
   cameraPos = glm::vec3(0.0f, -130.0f, 43.0f);
   cameraTarget = glm::vec3(0.0f, 0.0f, 43.0f);
 
   lightPos = cameraPos;
+
+  std::vector<glm::vec3> translations = {
+      glm::vec3(0, 0, 0),    glm::vec3(70, 0, 0),    glm::vec3(50, 0, -50),
+      glm::vec3(0, 0, -70),  glm::vec3(-50, 0, -50), glm::vec3(-70, 0, 0),
+      glm::vec3(-50, 0, 50), glm::vec3(0, 0, 70),    glm::vec3(50, 0, 50),
+  };
+
+  std::vector<glm::mat4> models{translations.size(), glm::mat4(1.0)};
 
   while (!glfwWindowShouldClose(window)) {
     processInput(window);
@@ -226,32 +230,32 @@ int main(int argc, char *argp[]) {
     glm::vec3 cameraUp = glm::cross(cameraDirection, cameraRight);
     glm::mat4 view = glm::lookAt(cameraPos, cameraTarget, cameraUp);
 
-    std::vector<glm::vec3> translations = {
-        glm::vec3(0, 0, 0), glm::vec3(70, 0, 0), glm::vec3(-70, 0, 0)};
-    CHECK(translations.size() == models.size());
-
     glUseProgram(shader);
     glUniformMatrix4fv(glGetUniformLocation(shader, "projection"), 1, GL_FALSE,
                        glm::value_ptr(projection));
     glUniformMatrix4fv(glGetUniformLocation(shader, "view"), 1, GL_FALSE,
                        glm::value_ptr(view));
 
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < models.size(); ++i) {
 
       models[i] = glm::translate(glm::mat4(1.0), translations[i]) *
                   glm::rotate(glm::mat4(1.0),
-                              (float)glfwGetTime() * glm::radians(40.0f),
-                              glm::vec3(0.0f, 0.0f, 1.0f));
+                              (float)glfwGetTime() * (i % 2 ? 1 : -1) *
+                                  glm::radians(40.0f),
+                              glm::vec3(0, 0, 1));
 
-      glUniformMatrix4fv(glGetUniformLocation(shader, ("models[" + std::to_string(i) + "]").c_str()), 1, GL_FALSE,
-                         glm::value_ptr(models[i]));
+      glUniformMatrix4fv(
+          glGetUniformLocation(shader,
+                               ("models[" + std::to_string(i) + "]").c_str()),
+          1, GL_FALSE, glm::value_ptr(models[i]));
     }
 
     glUniform3fv(glGetUniformLocation(shader, "lightPos"), 1,
                  glm::value_ptr(lightPos));
 
     glBindVertexArray(VAO);
-    glDrawElementsInstanced(GL_TRIANGLES, mesh->mNumFaces * 3, GL_UNSIGNED_INT, 0, 3);
+    glDrawElementsInstanced(GL_TRIANGLES, mesh->mNumFaces * 3, GL_UNSIGNED_INT,
+                            0, translations.size());
 
     glfwSwapBuffers(window);
     glfwPollEvents();
