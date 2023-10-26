@@ -32,15 +32,16 @@ const char *vertexShaderSource =
     "#version 330 core\n"
     "layout (location = 0) in vec3 aPos;\n"
     "layout (location = 1) in vec3 aNormal;\n"
-    "uniform mat4 model;\n"
+    "uniform mat4 models[3];\n"
     "uniform mat4 view;\n"
     "uniform mat4 projection;\n"
     "out vec3 FragPos;\n"
     "out vec3 Normal;\n"
     "void main() {\n"
-    "  gl_Position = projection * view * model * vec4(aPos, 1.0);\n"
-    "  Normal = mat3(transpose(inverse(model))) * aNormal;"
-    "  FragPos = vec3(model * vec4(aPos, 1.0));\n"
+    "  gl_Position = projection * view * models[gl_InstanceID] * vec4(aPos, "
+    "1.0);\n"
+    "  Normal = mat3(transpose(inverse(models[gl_InstanceID]))) * aNormal;"
+    "  FragPos = vec3(models[gl_InstanceID] * vec4(aPos, 1.0));\n"
     "}\0";
 
 const char *fragmentShaderSource =
@@ -229,29 +230,28 @@ int main(int argc, char *argp[]) {
         glm::vec3(0, 0, 0), glm::vec3(70, 0, 0), glm::vec3(-70, 0, 0)};
     CHECK(translations.size() == models.size());
 
+    glUseProgram(shader);
+    glUniformMatrix4fv(glGetUniformLocation(shader, "projection"), 1, GL_FALSE,
+                       glm::value_ptr(projection));
+    glUniformMatrix4fv(glGetUniformLocation(shader, "view"), 1, GL_FALSE,
+                       glm::value_ptr(view));
+
     for (int i = 0; i < 3; ++i) {
-      glUseProgram(shader);
-      glUniformMatrix4fv(glGetUniformLocation(shader, "projection"), 1,
-                         GL_FALSE, glm::value_ptr(projection));
-      glUniformMatrix4fv(glGetUniformLocation(shader, "view"), 1, GL_FALSE,
-                         glm::value_ptr(view));
 
       models[i] = glm::translate(glm::mat4(1.0), translations[i]) *
                   glm::rotate(glm::mat4(1.0),
                               (float)glfwGetTime() * glm::radians(40.0f),
                               glm::vec3(0.0f, 0.0f, 1.0f));
 
-      glUniformMatrix4fv(glGetUniformLocation(shader, "model"), 1, GL_FALSE,
+      glUniformMatrix4fv(glGetUniformLocation(shader, ("models[" + std::to_string(i) + "]").c_str()), 1, GL_FALSE,
                          glm::value_ptr(models[i]));
-      glUniform3fv(glGetUniformLocation(shader, "lightPos"), 1,
-                   glm::value_ptr(lightPos));
-
-      glBindVertexArray(VAO);
-      glDrawElements(GL_TRIANGLES, mesh->mNumFaces * 3, GL_UNSIGNED_INT, 0);
     }
 
+    glUniform3fv(glGetUniformLocation(shader, "lightPos"), 1,
+                 glm::value_ptr(lightPos));
+
     glBindVertexArray(VAO);
-    glDrawElements(GL_TRIANGLES, mesh->mNumFaces * 3, GL_UNSIGNED_INT, 0);
+    glDrawElementsInstanced(GL_TRIANGLES, mesh->mNumFaces * 3, GL_UNSIGNED_INT, 0, 3);
 
     glfwSwapBuffers(window);
     glfwPollEvents();
