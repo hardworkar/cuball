@@ -4,4 +4,4 @@ cd out/Release
 cmake --build . --config Release
 if %errorlevel% neq 0 cd ../.. && exit /b %errorlevel%
 cd ../..
-.\out\Release\Release\cuball.exe .\resources\FREDDYFAZBEAR.stl
+.\out\Release\Release\cuball.exe .\resources\FREDDYFAZBEAR.stl .\resources\BALL.stl
