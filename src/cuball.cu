@@ -23,10 +23,11 @@ const unsigned int SCR_HEIGHT = 1080;
 glm::vec3 cameraPos = glm::vec3(0.0f, -200.0f, 00.0f);
 glm::vec3 cameraTarget = glm::vec3(0.0f, 0.0f, 00.0f);
 int numOfModels = 100;
+int discretization = 20;
 } // namespace globals
 
 std::pair<std::vector<float>, std::vector<unsigned int>>
-importModel(const std::string &iFilename) {
+importModel(const std::string &iFilename, bool iRescale) {
   static Assimp::Importer importer;
   const aiScene *scene = importer.ReadFile(
       iFilename, aiProcess_CalcTangentSpace | aiProcess_Triangulate |
@@ -154,7 +155,8 @@ void processInput(GLFWwindow *window) {
 }
 
 std::pair<GLuint, GLuint> bindModel(std::vector<float> &vertices,
-                                    std::vector<unsigned int> &indices) {
+                                    std::vector<unsigned int> &indices,
+                                    std::vector<glm::mat4> &models) {
   GLuint VBO, VAO, EBO;
   glGenVertexArrays(1, &VAO);
   glGenBuffers(1, &VBO);
@@ -176,37 +178,90 @@ std::pair<GLuint, GLuint> bindModel(std::vector<float> &vertices,
                         (void *)(3 * sizeof(float)));
   glEnableVertexAttribArray(1);
 
+  unsigned int instanceVBO;
+  glGenBuffers(1, &instanceVBO);
+  glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(glm::mat4) * models.size(), &models[0],
+               GL_STATIC_DRAW);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+  glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+  for (int pos = 0; pos < 4; ++pos) {
+    glEnableVertexAttribArray(pos + 2);
+    glVertexAttribPointer(pos + 2, 4, GL_FLOAT, GL_FALSE,
+                          sizeof(GLfloat) * 4 * 4,
+                          (void *)(sizeof(float) * pos * 4));
+    glVertexAttribDivisor(pos + 2, 1);
+  }
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   glBindVertexArray(0);
 
   return {VAO, VBO};
 }
 
+std::pair<glm::vec3, glm::vec3>
+computeBBox(const std::vector<float> &iVertices) {
+  std::pair<glm::vec3, glm::vec3> bbox = {glm::vec3(1e6, 1e6, 1e6),
+                                          glm::vec3(-1e6, -1e6, -1e6)};
+  for (int i = 0; i < iVertices.size() / 3; ++i) {
+    for (int j = 0; j < 3; ++j) {
+      bbox.first[j] = std::min(bbox.first[j], iVertices[3 * i + j]);
+      bbox.second[j] = std::max(bbox.second[j], iVertices[3 * i + j]);
+    }
+  }
+  return bbox;
+}
+
 int main(int argc, char *argp[]) {
   CHECK(argc == 3);
 
-  auto [bearVertices, bearIndices] = importModel(std::string(argp[1]));
-  auto [ballVertices, ballIndices] = importModel(std::string(argp[2]));
+  auto [bearVertices, bearIndices] = importModel(std::string(argp[1]), false);
+  auto [ballVertices, ballIndices] = importModel(std::string(argp[2]), false);
 
   GLFWwindow *window = initGLFW();
   CHECK(window);
+
+  std::pair<glm::vec3, glm::vec3> bearBBox = computeBBox(bearVertices);
+  std::pair<glm::vec3, glm::vec3> ballBBox = computeBBox(ballVertices);
+  float ballScale = 0.0f;
+  for (int i = 0; i < 3; ++i) {
+    ballScale = std::max(ballScale, ballBBox.second[i] - ballBBox.first[i]);
+  }
+
+  float vxlSize = 100000.0f;
+  for (int i = 0; i < 3; ++i) {
+    vxlSize = std::min(vxlSize, (bearBBox.second[i] - bearBBox.first[i]) /
+                                    globals::discretization);
+  }
+  std::vector<glm::mat4> ballsMatrices;
+  for (int i = 0; i < (bearBBox.second[0] - bearBBox.first[0]) / vxlSize; ++i) {
+    for (int j = 0; j < (bearBBox.second[1] - bearBBox.first[1]) / vxlSize;
+         ++j) {
+      for (int k = 0; k < (bearBBox.second[2] - bearBBox.first[2]) / vxlSize;
+           ++k) {
+        ballsMatrices.push_back(glm::scale(
+            glm::translate(glm::mat4(1.0),
+                           glm::vec3(bearBBox.first[0] + (i + 0.5f) * vxlSize,
+                                     bearBBox.first[1] + (j + 0.5f) * vxlSize,
+                                     bearBBox.first[2] + (k + 0.5f) * vxlSize)),
+            glm::vec3(vxlSize / ballScale)));
+      }
+    }
+  }
 
   std::string vertexShaderSource =
       "#version 330 core\n"
       "layout (location = 0) in vec3 aPos;\n"
       "layout (location = 1) in vec3 aNormal;\n"
-      "uniform mat4 models[" +
-      std::to_string(globals::numOfModels) +
-      "];\n"
+      "layout (location = 2) in mat4 aModel;\n"
       "uniform mat4 view;\n"
       "uniform mat4 projection;\n"
       "out vec3 FragPos;\n"
       "out vec3 Normal;\n"
       "void main() {\n"
-      "  gl_Position = projection * view * models[gl_InstanceID] * vec4(aPos, "
-      "1.0);\n"
-      "  Normal = mat3(transpose(inverse(models[gl_InstanceID]))) * aNormal;"
-      "  FragPos = vec3(models[gl_InstanceID] * vec4(aPos, 1.0));\n"
+      "  gl_Position = projection * view * aModel * vec4(aPos, 1.0);\n"
+      "  Normal = mat3(transpose(inverse(aModel))) * aNormal;"
+      "  FragPos = vec3(aModel * vec4(aPos, 1.0));\n"
       "}\0";
 
   const char *fragmentShaderSource =
@@ -227,21 +282,17 @@ int main(int argc, char *argp[]) {
 
   GLuint shader =
       compileShader(vertexShaderSource.c_str(), fragmentShaderSource);
-  const auto [bearVAO, bearVBO] = bindModel(bearVertices, bearIndices);
-  const auto [ballVAO, ballVBO] = bindModel(ballVertices, ballIndices);
+
+  std::vector<glm::mat4> bearMatrices{glm::mat4(1.0)};
+  const auto [bearVAO, bearVBO] =
+      bindModel(bearVertices, bearIndices, bearMatrices);
+  const auto [ballVAO, ballVBO] =
+      bindModel(ballVertices, ballIndices, ballsMatrices);
   glm::mat4 projection = glm::perspective(
       glm::radians(60.0f), (float)globals::SCR_WIDTH / globals::SCR_HEIGHT,
       0.1f, 1000.0f);
 
   glm::vec3 lightPos = globals::cameraPos;
-
-  float rotationStep = 2 * 3.1415f / globals::numOfModels;
-  std::vector<glm::vec3> positions;
-  for (int i = 0; i < globals::numOfModels; ++i) {
-    positions.push_back(glm::vec3(50.0f * cos(rotationStep * i), 0,
-                                  50.0f * sin(rotationStep * i)));
-  }
-  std::vector<glm::mat4> models{positions.size(), glm::mat4(1.0)};
 
   while (!glfwWindowShouldClose(window)) {
     processInput(window);
@@ -255,46 +306,23 @@ int main(int argc, char *argp[]) {
     glm::vec3 cameraUp = glm::cross(cameraDirection, cameraRight);
     glm::mat4 view =
         glm::lookAt(globals::cameraPos, globals::cameraTarget, cameraUp);
+    lightPos = globals::cameraPos;
 
     glUseProgram(shader);
     glUniformMatrix4fv(glGetUniformLocation(shader, "projection"), 1, GL_FALSE,
                        glm::value_ptr(projection));
     glUniformMatrix4fv(glGetUniformLocation(shader, "view"), 1, GL_FALSE,
                        glm::value_ptr(view));
-
-    for (int i = 0; i < models.size(); ++i) {
-      float rotationAngle = (float)glfwGetTime() * glm::radians(40.0f);
-      models[i] = glm::rotate(glm::translate(glm::mat4(1.0), positions[i]),
-                              rotationAngle, glm::vec3(0, 0, 1));
-
-      const std::string shaderModelEntry = "models[" + std::to_string(i) + "]";
-      glUniformMatrix4fv(glGetUniformLocation(shader, shaderModelEntry.c_str()),
-                         1, GL_FALSE, glm::value_ptr(models[i]));
-    }
-
     glUniform3fv(glGetUniformLocation(shader, "lightPos"), 1,
                  glm::value_ptr(lightPos));
 
     glBindVertexArray(bearVAO);
     glDrawElementsInstanced(GL_TRIANGLES, bearIndices.size(), GL_UNSIGNED_INT,
-                            0, positions.size());
-
-    for (int i = 0; i < models.size(); ++i) {
-      models[i] = glm::scale(
-          glm::translate(glm::rotate(glm::mat4(1.0),
-                                     (float)glfwGetTime() * glm::radians(40.0f),
-                                     glm::vec3(0, 1, 0)),
-                         2.0f * positions[i]),
-          glm::vec3(0.2, 0.2, 0.2));
-
-      const std::string shaderModelEntry = "models[" + std::to_string(i) + "]";
-      glUniformMatrix4fv(glGetUniformLocation(shader, shaderModelEntry.c_str()),
-                         1, GL_FALSE, glm::value_ptr(models[i]));
-    }
+                            0, bearMatrices.size());
 
     glBindVertexArray(ballVAO);
     glDrawElementsInstanced(GL_TRIANGLES, ballIndices.size(), GL_UNSIGNED_INT,
-                            0, positions.size());
+                            0, ballsMatrices.size());
 
     glfwSwapBuffers(window);
     glfwPollEvents();
