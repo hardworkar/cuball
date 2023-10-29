@@ -9,6 +9,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/intersect.hpp>
+#include <glm/gtx/string_cast.hpp>
 #include <stdio.h>
 #include <vector>
 
@@ -23,11 +25,11 @@ const unsigned int SCR_HEIGHT = 1080;
 glm::vec3 cameraPos = glm::vec3(0.0f, -200.0f, 00.0f);
 glm::vec3 cameraTarget = glm::vec3(0.0f, 0.0f, 00.0f);
 int numOfModels = 100;
-int discretization = 20;
+int discretization = 5;
 } // namespace globals
 
 std::pair<std::vector<float>, std::vector<unsigned int>>
-importModel(const std::string &iFilename, bool iRescale) {
+importModel(const std::string &iFilename) {
   static Assimp::Importer importer;
   const aiScene *scene = importer.ReadFile(
       iFilename, aiProcess_CalcTangentSpace | aiProcess_Triangulate |
@@ -140,6 +142,7 @@ GLuint compileShader(const char *iVertexShaderSource,
   return shader;
 }
 
+unsigned int showBearBalls = 0b01;
 void processInput(GLFWwindow *window) {
   if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
     glfwSetWindowShouldClose(window, true);
@@ -152,6 +155,13 @@ void processInput(GLFWwindow *window) {
     r += 0.3;
   cameraPos.x = r * cos(phi);
   cameraPos.y = r * sin(phi);
+
+  static bool lastBState = true;
+  bool currState = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
+  if (currState && !lastBState)
+    showBearBalls += 1;
+  showBearBalls = showBearBalls > 0b11 ? 0b01 : showBearBalls;
+  lastBState = currState;
 }
 
 std::pair<GLuint, GLuint> bindModel(std::vector<float> &vertices,
@@ -200,23 +210,67 @@ std::pair<GLuint, GLuint> bindModel(std::vector<float> &vertices,
 }
 
 std::pair<glm::vec3, glm::vec3>
-computeBBox(const std::vector<float> &iVertices) {
+computeBBox(const std::vector<float> &iVerticesWithNormals) {
   std::pair<glm::vec3, glm::vec3> bbox = {glm::vec3(1e6, 1e6, 1e6),
                                           glm::vec3(-1e6, -1e6, -1e6)};
-  for (int i = 0; i < iVertices.size() / 3; ++i) {
+  for (int i = 0; i < iVerticesWithNormals.size() / 6; ++i) {
     for (int j = 0; j < 3; ++j) {
-      bbox.first[j] = std::min(bbox.first[j], iVertices[3 * i + j]);
-      bbox.second[j] = std::max(bbox.second[j], iVertices[3 * i + j]);
+      bbox.first[j] = std::min(bbox.first[j], iVerticesWithNormals[6 * i + j]);
+      bbox.second[j] =
+          std::max(bbox.second[j], iVerticesWithNormals[6 * i + j]);
     }
   }
   return bbox;
 }
 
+bool rayTriangleIntersect(const glm::vec3 &orig, const glm::vec3 &dir,
+                          const glm::vec3 &v0, const glm::vec3 &v1,
+                          const glm::vec3 &v2, float &t) {
+  glm::vec3 v0v1 = v1 - v0;
+  glm::vec3 v0v2 = v2 - v0;
+  glm::vec3 N = glm::cross(v0v1, v0v2); // N
+  float area2 = N.length();
+
+  float NdotRayDirection = glm::dot(N, dir);
+  if (fabs(NdotRayDirection) < 1e-6)
+    return false;
+
+  float d = glm::dot(-N, v0);
+
+  t = -(glm::dot(N, orig) + d) / NdotRayDirection;
+
+  if (t < 0)
+    return false;
+
+  glm::vec3 P = orig + t * dir;
+  glm::vec3 C;
+
+  glm::vec3 edge0 = v1 - v0;
+  glm::vec3 vp0 = P - v0;
+  C = glm::cross(edge0, vp0);
+  if (glm::dot(N, C) < 0)
+    return false;
+
+  glm::vec3 edge1 = v2 - v1;
+  glm::vec3 vp1 = P - v1;
+  C = glm::cross(edge1, vp1);
+  if (glm::dot(N, C) < 0)
+    return false;
+
+  glm::vec3 edge2 = v0 - v2;
+  glm::vec3 vp2 = P - v2;
+  C = glm::cross(edge2, vp2);
+  if (glm::dot(N, C) < 0)
+    return false;
+
+  return true;
+}
+
 int main(int argc, char *argp[]) {
   CHECK(argc == 3);
 
-  auto [bearVertices, bearIndices] = importModel(std::string(argp[1]), false);
-  auto [ballVertices, ballIndices] = importModel(std::string(argp[2]), false);
+  auto [bearVertices, bearIndices] = importModel(std::string(argp[1]));
+  auto [ballVertices, ballIndices] = importModel(std::string(argp[2]));
 
   GLFWwindow *window = initGLFW();
   CHECK(window);
@@ -233,18 +287,37 @@ int main(int argc, char *argp[]) {
     vxlSize = std::min(vxlSize, (bearBBox.second[i] - bearBBox.first[i]) /
                                     globals::discretization);
   }
+
+  std::vector<glm::vec3> bearVerticesOnly;
+  for (int i = 0; i < bearVertices.size() / 6; ++i) {
+    glm::vec3 vertex;
+    for (int j = 0; j < 3; ++j)
+      vertex[j] = bearVertices[i * 6 + j];
+    bearVerticesOnly.push_back(vertex);
+  }
   std::vector<glm::mat4> ballsMatrices;
-  for (int i = 0; i < (bearBBox.second[0] - bearBBox.first[0]) / vxlSize; ++i) {
-    for (int j = 0; j < (bearBBox.second[1] - bearBBox.first[1]) / vxlSize;
-         ++j) {
-      for (int k = 0; k < (bearBBox.second[2] - bearBBox.first[2]) / vxlSize;
-           ++k) {
-        ballsMatrices.push_back(glm::scale(
-            glm::translate(glm::mat4(1.0),
-                           glm::vec3(bearBBox.first[0] + (i + 0.5f) * vxlSize,
-                                     bearBBox.first[1] + (j + 0.5f) * vxlSize,
-                                     bearBBox.first[2] + (k + 0.5f) * vxlSize)),
-            glm::vec3(vxlSize / ballScale)));
+  glm::ivec3 dims = glm::ivec3((bearBBox.second - bearBBox.first) / vxlSize);
+  for (int i = 0; i < dims[0]; ++i) {
+    for (int j = 0; j < dims[1]; ++j) {
+      for (int k = 0; k < dims[2]; ++k) {
+        glm::vec3 voxelPos =
+            bearBBox.first + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * vxlSize;
+
+        int intersections = 0;
+        for (int idx = 0; idx < bearIndices.size(); idx += 3) {
+          glm::vec3 vert0 = bearVerticesOnly[bearIndices[idx]];
+          glm::vec3 vert1 = bearVerticesOnly[bearIndices[idx + 1]];
+          glm::vec3 vert2 = bearVerticesOnly[bearIndices[idx + 2]];
+          float t;
+          if (rayTriangleIntersect(voxelPos, glm::vec3(0, 1, 0), vert0, vert1,
+                                   vert2, t)) {
+            ++intersections;
+          }
+        }
+        if (intersections % 2 == 1)
+          ballsMatrices.push_back(
+              glm::scale(glm::translate(glm::mat4(1.0), voxelPos),
+                         glm::vec3(vxlSize / ballScale)));
       }
     }
   }
@@ -260,7 +333,8 @@ int main(int argc, char *argp[]) {
       "out vec3 Normal;\n"
       "void main() {\n"
       "  gl_Position = projection * view * aModel * vec4(aPos, 1.0);\n"
-      "  Normal = mat3(transpose(inverse(aModel))) * aNormal;"
+      "  vec3 normal = normalize(aNormal);\n"
+      "  Normal = mat3(transpose(inverse(aModel))) * normal;"
       "  FragPos = vec3(aModel * vec4(aPos, 1.0));\n"
       "}\0";
 
@@ -316,13 +390,17 @@ int main(int argc, char *argp[]) {
     glUniform3fv(glGetUniformLocation(shader, "lightPos"), 1,
                  glm::value_ptr(lightPos));
 
-    glBindVertexArray(bearVAO);
-    glDrawElementsInstanced(GL_TRIANGLES, bearIndices.size(), GL_UNSIGNED_INT,
-                            0, bearMatrices.size());
+    if (showBearBalls & 0b01) {
+      glBindVertexArray(bearVAO);
+      glDrawElementsInstanced(GL_TRIANGLES, bearIndices.size(), GL_UNSIGNED_INT,
+                              0, bearMatrices.size());
+    }
 
-    glBindVertexArray(ballVAO);
-    glDrawElementsInstanced(GL_TRIANGLES, ballIndices.size(), GL_UNSIGNED_INT,
-                            0, ballsMatrices.size());
+    if (showBearBalls & 0b10) {
+      glBindVertexArray(ballVAO);
+      glDrawElementsInstanced(GL_TRIANGLES, ballIndices.size(), GL_UNSIGNED_INT,
+                              0, ballsMatrices.size());
+    }
 
     glfwSwapBuffers(window);
     glfwPollEvents();
