@@ -6,6 +6,7 @@
 #include <GLFW/glfw3.h>
 // clang-format on
 #include <array>
+#include <chrono>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -25,16 +26,15 @@ const unsigned int SCR_HEIGHT = 1080;
 glm::vec3 cameraPos = glm::vec3(0.0f, -200.0f, 00.0f);
 glm::vec3 cameraTarget = glm::vec3(0.0f, 0.0f, 00.0f);
 int numOfModels = 100;
-int discretization = 5;
+int discretization = 30;
 } // namespace globals
 
 std::pair<std::vector<float>, std::vector<unsigned int>>
 importModel(const std::string &iFilename) {
   static Assimp::Importer importer;
   const aiScene *scene = importer.ReadFile(
-      iFilename, aiProcess_CalcTangentSpace | aiProcess_Triangulate |
-                     aiProcess_JoinIdenticalVertices | aiProcess_SortByPType |
-                     aiProcess_GenSmoothNormals);
+      iFilename, aiProcess_CalcTangentSpace | aiProcess_JoinIdenticalVertices |
+                     aiProcess_SortByPType | aiProcess_GenSmoothNormals);
   if (!scene || scene->mNumMeshes != 1 || scene->mMeshes[0]->mNormals == NULL) {
     fprintf(stderr, "Failed to import %s: %s\n", iFilename.c_str(),
             importer.GetErrorString());
@@ -65,8 +65,8 @@ importModel(const std::string &iFilename) {
 
   std::vector<unsigned int> indices;
   indices.reserve(mesh->mNumFaces * 3);
-  for (auto i = 0; i < mesh->mNumFaces; ++i) {
-    for (auto j = 0; j < 3; ++j)
+  for (int i = 0; i < mesh->mNumFaces; ++i) {
+    for (int j = 0; j < 3; ++j)
       indices.push_back(mesh->mFaces[i].mIndices[j]);
   }
   return {vertices, indices};
@@ -153,6 +153,10 @@ void processInput(GLFWwindow *window) {
     r -= 0.3;
   if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
     r += 0.3;
+  if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+    phi += 0.1;
+  if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+    phi -= 0.1;
   cameraPos.x = r * cos(phi);
   cameraPos.y = r * sin(phi);
 
@@ -211,24 +215,24 @@ std::pair<GLuint, GLuint> bindModel(std::vector<float> &vertices,
 
 std::pair<glm::vec3, glm::vec3>
 computeBBox(const std::vector<float> &iVerticesWithNormals) {
-  std::pair<glm::vec3, glm::vec3> bbox = {glm::vec3(1e6, 1e6, 1e6),
-                                          glm::vec3(-1e6, -1e6, -1e6)};
+  std::pair<glm::vec3, glm::vec3> b = {glm::vec3(1e6, 1e6, 1e6),
+                                       glm::vec3(-1e6, -1e6, -1e6)};
   for (int i = 0; i < iVerticesWithNormals.size() / 6; ++i) {
     for (int j = 0; j < 3; ++j) {
-      bbox.first[j] = std::min(bbox.first[j], iVerticesWithNormals[6 * i + j]);
-      bbox.second[j] =
-          std::max(bbox.second[j], iVerticesWithNormals[6 * i + j]);
+      b.first[j] = std::min(b.first[j], iVerticesWithNormals[6 * i + j]);
+      b.second[j] = std::max(b.second[j], iVerticesWithNormals[6 * i + j]);
     }
   }
-  return bbox;
+  return b;
 }
 
-bool rayTriangleIntersect(const glm::vec3 &orig, const glm::vec3 &dir,
-                          const glm::vec3 &v0, const glm::vec3 &v1,
-                          const glm::vec3 &v2, float &t) {
+__device__ bool rayTriangleIntersect(const glm::vec3 &orig,
+                                     const glm::vec3 &dir, const glm::vec3 &v0,
+                                     const glm::vec3 &v1, const glm::vec3 &v2,
+                                     float &t) {
   glm::vec3 v0v1 = v1 - v0;
   glm::vec3 v0v2 = v2 - v0;
-  glm::vec3 N = glm::cross(v0v1, v0v2); // N
+  glm::vec3 N = glm::cross(v0v1, v0v2);
   float area2 = N.length();
 
   float NdotRayDirection = glm::dot(N, dir);
@@ -266,21 +270,54 @@ bool rayTriangleIntersect(const glm::vec3 &orig, const glm::vec3 &dir,
   return true;
 }
 
+__global__ void raycast(size_t indicesSize, float *gpuVertices,
+                        unsigned int *gpuIndices, unsigned char *gpuOutput,
+                        unsigned int mi, unsigned int mj, unsigned int mk,
+                        glm::vec3 offset, float vxlSize) {
+  int index = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+  int n = mi * mj * mk;
+
+  for (int v = index; v < n; v += stride) {
+    int i = v / mj / mk;
+    int j = (v / mk) % mj;
+    int k = v % mk;
+    glm::vec3 voxelPos =
+        offset + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * vxlSize;
+
+    for (int idx = 0; idx < indicesSize; idx += 3) {
+      glm::vec3 vert0 = glm::vec3(gpuVertices[3 * gpuIndices[idx]],
+                                  gpuVertices[3 * gpuIndices[idx] + 1],
+                                  gpuVertices[3 * gpuIndices[idx] + 2]);
+      glm::vec3 vert1 = glm::vec3(gpuVertices[3 * gpuIndices[idx + 1]],
+                                  gpuVertices[3 * gpuIndices[idx + 1] + 1],
+                                  gpuVertices[3 * gpuIndices[idx + 1] + 2]);
+      glm::vec3 vert2 = glm::vec3(gpuVertices[3 * gpuIndices[idx + 2]],
+                                  gpuVertices[3 * gpuIndices[idx + 2] + 1],
+                                  gpuVertices[3 * gpuIndices[idx + 2] + 2]);
+      float t;
+      gpuOutput[i * mj * mk + j * mk + k] += rayTriangleIntersect(
+          voxelPos, glm::vec3(0, 0, 1), vert0, vert1, vert2, t);
+    }
+  }
+}
+
 int main(int argc, char *argp[]) {
   CHECK(argc == 3);
 
-  auto [bearVertices, bearIndices] = importModel(std::string(argp[1]));
+  auto [bearVerticesWithNormals, bearIndices] =
+      importModel(std::string(argp[1]));
   auto [ballVertices, ballIndices] = importModel(std::string(argp[2]));
 
   GLFWwindow *window = initGLFW();
   CHECK(window);
 
-  std::pair<glm::vec3, glm::vec3> bearBBox = computeBBox(bearVertices);
+  std::pair<glm::vec3, glm::vec3> bearBBox =
+      computeBBox(bearVerticesWithNormals);
   std::pair<glm::vec3, glm::vec3> ballBBox = computeBBox(ballVertices);
   float ballScale = 0.0f;
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < 3; ++i)
     ballScale = std::max(ballScale, ballBBox.second[i] - ballBBox.first[i]);
-  }
 
   float vxlSize = 100000.0f;
   for (int i = 0; i < 3; ++i) {
@@ -288,39 +325,58 @@ int main(int argc, char *argp[]) {
                                     globals::discretization);
   }
 
-  std::vector<glm::vec3> bearVerticesOnly;
-  for (int i = 0; i < bearVertices.size() / 6; ++i) {
-    glm::vec3 vertex;
+  float *gpuVertices;
+  unsigned int *gpuIndices;
+  cudaMallocManaged(&gpuVertices,
+                    bearVerticesWithNormals.size() / 2 * sizeof(float));
+  cudaMallocManaged(&gpuIndices, bearIndices.size() * sizeof(unsigned int));
+  for (int i = 0; i < bearVerticesWithNormals.size() / 6; ++i) {
     for (int j = 0; j < 3; ++j)
-      vertex[j] = bearVertices[i * 6 + j];
-    bearVerticesOnly.push_back(vertex);
+      gpuVertices[i * 3 + j] = bearVerticesWithNormals[i * 6 + j];
   }
+  for (int i = 0; i < bearIndices.size(); ++i) {
+    gpuIndices[i] = bearIndices[i];
+  }
+
   std::vector<glm::mat4> ballsMatrices;
   glm::ivec3 dims = glm::ivec3((bearBBox.second - bearBBox.first) / vxlSize);
+
+  unsigned char *gpuOutput;
+  cudaMallocManaged(&gpuOutput,
+                    dims[0] * dims[1] * dims[2] * sizeof(unsigned char));
+  for (int i = 0; i < dims[0] * dims[1] * dims[2]; ++i)
+    gpuOutput[i] = 0;
+
+  int blockSize = 256;
+  int N = dims[0] * dims[1] * dims[2];
+  int numBlocks = (N + blockSize - 1) / blockSize;
+  auto start = std::chrono::high_resolution_clock::now();
+  raycast<<<numBlocks, blockSize>>>(bearIndices.size(), gpuVertices, gpuIndices,
+                                    gpuOutput, dims[0], dims[1], dims[2],
+                                    bearBBox.first, vxlSize);
+  cudaDeviceSynchronize();
+  auto stop = std::chrono::high_resolution_clock::now();
+  auto duration =
+      std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+  printf("raycasting took %lld microsecs\n", duration.count());
+
+  start = std::chrono::high_resolution_clock::now();
   for (int i = 0; i < dims[0]; ++i) {
     for (int j = 0; j < dims[1]; ++j) {
       for (int k = 0; k < dims[2]; ++k) {
         glm::vec3 voxelPos =
             bearBBox.first + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * vxlSize;
-
-        int intersections = 0;
-        for (int idx = 0; idx < bearIndices.size(); idx += 3) {
-          glm::vec3 vert0 = bearVerticesOnly[bearIndices[idx]];
-          glm::vec3 vert1 = bearVerticesOnly[bearIndices[idx + 1]];
-          glm::vec3 vert2 = bearVerticesOnly[bearIndices[idx + 2]];
-          float t;
-          if (rayTriangleIntersect(voxelPos, glm::vec3(0, 1, 0), vert0, vert1,
-                                   vert2, t)) {
-            ++intersections;
-          }
-        }
-        if (intersections % 2 == 1)
+        if (gpuOutput[i * dims[1] * dims[2] + j * dims[2] + k] % 2 == 1)
           ballsMatrices.push_back(
               glm::scale(glm::translate(glm::mat4(1.0), voxelPos),
                          glm::vec3(vxlSize / ballScale)));
       }
     }
   }
+  stop = std::chrono::high_resolution_clock::now();
+  duration =
+      std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+  printf("filling balls matrices took %lld microsecs\n", duration.count());
 
   std::string vertexShaderSource =
       "#version 330 core\n"
@@ -359,7 +415,7 @@ int main(int argc, char *argp[]) {
 
   std::vector<glm::mat4> bearMatrices{glm::mat4(1.0)};
   const auto [bearVAO, bearVBO] =
-      bindModel(bearVertices, bearIndices, bearMatrices);
+      bindModel(bearVerticesWithNormals, bearIndices, bearMatrices);
   const auto [ballVAO, ballVBO] =
       bindModel(ballVertices, ballIndices, ballsMatrices);
   glm::mat4 projection = glm::perspective(
