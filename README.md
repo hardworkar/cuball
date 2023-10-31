@@ -3,6 +3,8 @@
 We will have BALLS and they will FALL.
 
 ## log
+31/10/23 GPU-POWERED BALLS IN THE BEAR.
+![filled](./results/filled.gif)
 
 28/10/23 WE'VE GOT BALLS. MANY OF THEM.
 
