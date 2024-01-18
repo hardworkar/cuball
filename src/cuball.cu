@@ -33,10 +33,9 @@ float max3(const glm::vec3 &v) { return std::max(std::max(v.x, v.y), v.z); }
 float min3(const glm::vec3 &v) { return std::min(std::min(v.x, v.y), v.z); }
 
 struct Box3 {
-  Box3() {
-    min = glm::vec3(MAX_FLOAT, MAX_FLOAT, MAX_FLOAT);
-    max = glm::vec3(MIN_FLOAT, MIN_FLOAT, MIN_FLOAT);
-  }
+  Box3()
+      : min(glm::vec3(MAX_FLOAT, MAX_FLOAT, MAX_FLOAT)),
+        max(glm::vec3(MIN_FLOAT, MIN_FLOAT, MIN_FLOAT)) {}
   Box3(const glm::vec3 &iMin, const glm::vec3 &iMax) : min(iMin), max(iMax) {}
   glm::vec3 getCenter() { return (max + min) / 2.0f; }
   glm::vec3 getSize() { return max - min; }
@@ -187,22 +186,33 @@ void processInput(GLFWwindow *window) {
   lastBState = currState;
 }
 
-std::pair<GLuint, GLuint> bindModel(std::vector<float> &vertices,
-                                    std::vector<unsigned int> &indices,
-                                    std::vector<glm::mat4> &models) {
-  GLuint VBO, VAO, EBO;
-  glGenVertexArrays(1, &VAO);
-  glGenBuffers(1, &VBO);
-  glGenBuffers(1, &EBO);
-  glBindVertexArray(VAO);
+struct OpenGLObject {
+  GLuint vbo, vao, ebo, instanceVBO;
+  void release() {
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &ebo);
+    glDeleteBuffers(1, &instanceVBO);
+  }
+};
 
-  glBindBuffer(GL_ARRAY_BUFFER, VBO);
-  glBufferData(GL_ARRAY_BUFFER, sizeof(vertices[0]) * vertices.size(),
-               vertices.data(), GL_STATIC_DRAW);
+OpenGLObject bindModel(Mesh &iMesh, std::vector<glm::mat4> &models) {
+  OpenGLObject openGLObject;
+  glGenBuffers(1, &openGLObject.vbo);
+  glGenVertexArrays(1, &openGLObject.vao);
+  glGenBuffers(1, &openGLObject.ebo);
+  glGenBuffers(1, &openGLObject.instanceVBO);
 
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-  glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices[0]) * indices.size(),
-               indices.data(), GL_STATIC_DRAW);
+  glBindVertexArray(openGLObject.vao);
+
+  glBindBuffer(GL_ARRAY_BUFFER, openGLObject.vbo);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(float) * iMesh.vertices.size(),
+               iMesh.vertices.data(), GL_STATIC_DRAW);
+
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, openGLObject.ebo);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+               sizeof(iMesh.indices[0]) * iMesh.indices.size(),
+               iMesh.indices.data(), GL_STATIC_DRAW);
 
   glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *)0);
   glEnableVertexAttribArray(0);
@@ -211,14 +221,12 @@ std::pair<GLuint, GLuint> bindModel(std::vector<float> &vertices,
                         (void *)(3 * sizeof(float)));
   glEnableVertexAttribArray(1);
 
-  unsigned int instanceVBO;
-  glGenBuffers(1, &instanceVBO);
-  glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+  glBindBuffer(GL_ARRAY_BUFFER, openGLObject.instanceVBO);
   glBufferData(GL_ARRAY_BUFFER, sizeof(glm::mat4) * models.size(), &models[0],
                GL_STATIC_DRAW);
   glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-  glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+  glBindBuffer(GL_ARRAY_BUFFER, openGLObject.instanceVBO);
   for (int pos = 0; pos < 4; ++pos) {
     glEnableVertexAttribArray(pos + 2);
     glVertexAttribPointer(pos + 2, 4, GL_FLOAT, GL_FALSE,
@@ -229,7 +237,7 @@ std::pair<GLuint, GLuint> bindModel(std::vector<float> &vertices,
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   glBindVertexArray(0);
 
-  return {VAO, VBO};
+  return openGLObject;
 }
 
 __device__ bool rayTriangleIntersect(const glm::vec3 &orig,
@@ -305,7 +313,7 @@ int main(int argc, char *argp[]) {
               bear.indices.size() * sizeof(bear.indices[0]));
 
   std::vector<glm::mat4> relativePositions;
-  glm::ivec3 dims = glm::ivec3((bearBBox.getSize()) / vxlSize);
+  glm::ivec3 dims = glm::ivec3(bearBBox.getSize() / vxlSize);
 
   int N = dims[0] * dims[1] * dims[2];
   unsigned char *gpuOutput;
@@ -322,18 +330,19 @@ int main(int argc, char *argp[]) {
   for (int i = 0; i < dims[0]; ++i) {
     for (int j = 0; j < dims[1]; ++j) {
       for (int k = 0; k < dims[2]; ++k) {
+        if (gpuOutput[i * dims[1] * dims[2] + j * dims[2] + k] % 2 == 0)
+          continue;
         glm::vec3 pos =
             bearBBox.min + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * vxlSize;
-        if (gpuOutput[i * dims[1] * dims[2] + j * dims[2] + k] % 2)
-          relativePositions.push_back(
-              glm::scale(glm::translate(glm::mat4(1.0), pos),
-                         glm::vec3(vxlSize / ballScale)));
+        relativePositions.push_back(
+            glm::scale(glm::translate(glm::mat4(1.0), pos),
+                       glm::vec3(vxlSize / ballScale)));
       }
     }
   }
   std::vector<glm::mat4> bearMatrices{glm::mat4(1.0)};
 
-  std::string vertexShaderSrc =
+  const char *vertexShaderSrc =
       "#version 330 core\n"
       "layout (location = 0) in vec3 aPos;\n"
       "layout (location = 1) in vec3 aNormal;\n"
@@ -365,12 +374,10 @@ int main(int argc, char *argp[]) {
       "  FragColor = vec4(ambient + diffuse, 0.0);\n"
       "}\0";
 
-  GLuint shader = compileShader(vertexShaderSrc.c_str(), fragmentShaderSrc);
+  GLuint shader = compileShader(vertexShaderSrc, fragmentShaderSrc);
 
-  auto [bearVAO, bearVBO] =
-      bindModel(bear.vertices, bear.indices, bearMatrices);
-  auto [ballVAO, ballVBO] =
-      bindModel(ball.vertices, ball.indices, relativePositions);
+  OpenGLObject bearGL = bindModel(bear, bearMatrices);
+  OpenGLObject ballGL = bindModel(ball, relativePositions);
   glm::mat4 projection = glm::perspective(
       glm::radians(60.0f), (float)g::SCR_WIDTH / g::SCR_HEIGHT, 0.1f, 1000.0f);
 
@@ -394,13 +401,13 @@ int main(int argc, char *argp[]) {
                  glm::value_ptr(g::cameraPos));
 
     if (showBearBalls & 0b01) {
-      glBindVertexArray(bearVAO);
+      glBindVertexArray(bearGL.vao);
       glDrawElementsInstanced(GL_TRIANGLES, bear.indices.size(),
                               GL_UNSIGNED_INT, 0, bearMatrices.size());
     }
 
     if (showBearBalls & 0b10) {
-      glBindVertexArray(ballVAO);
+      glBindVertexArray(ballGL.vao);
       glDrawElementsInstanced(GL_TRIANGLES, ball.indices.size(),
                               GL_UNSIGNED_INT, 0, relativePositions.size());
     }
@@ -409,8 +416,8 @@ int main(int argc, char *argp[]) {
     glfwPollEvents();
   }
 
-  glDeleteBuffers(1, &bearVBO);
-  glDeleteBuffers(1, &ballVBO);
+  bearGL.release();
+  ballGL.release();
   glfwTerminate();
   return 0;
 }
