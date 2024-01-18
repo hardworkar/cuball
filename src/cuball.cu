@@ -11,6 +11,7 @@
 #include <cstring>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/intersect.hpp>
 #include <glm/gtx/string_cast.hpp>
@@ -26,6 +27,47 @@ glm::vec3 cameraTarget = glm::vec3(0.0f, 0.0f, 00.0f);
 int discretization = 30;
 float aspect = (float)SCR_WIDTH / SCR_HEIGHT;
 } // namespace g
+
+const char *vertexShaderSrc =
+    "#version 330 core\n"
+    "layout (location = 0) in vec3 aPos;\n"
+    "layout (location = 1) in vec3 aNormal;\n"
+    "layout (location = 2) in mat4 aModel;\n"
+    "uniform mat4 view;\n"
+    "uniform mat4 projection;\n"
+    "out vec3 FragPos;\n"
+    "out vec3 Normal;\n"
+    "void main() {\n"
+    "  gl_Position = projection * view * aModel * vec4(aPos, 1.0);\n"
+    "  vec3 normal = normalize(aNormal);\n"
+    "  Normal = mat3(transpose(inverse(aModel))) * normal;"
+    "  FragPos = vec3(aModel * vec4(aPos, 1.0));\n"
+    "}\0";
+
+const char *fragmentShaderSrc =
+    "#version 330 core\n"
+    "uniform vec3 lightPos;\n"
+    "in vec3 FragPos;\n"
+    "in vec3 Normal;\n"
+    "out vec4 FragColor;\n"
+    "void main() {\n"
+    "  vec3 lightColor = vec3(0.5, 0.1, 0.5);\n"
+    "  vec3 lightDir = normalize(lightPos - FragPos);\n"
+    "  float diff = max(0.0, dot(Normal, lightDir));\n"
+    "  vec3 diffuse = diff * lightColor;\n"
+    "  float ambientStrength = 0.5;\n"
+    "  vec3 ambient = ambientStrength * lightColor;\n"
+    "  FragColor = vec4(ambient + diffuse, 0.0);\n"
+    "}\0";
+
+glm::mat4 getCameraView() {
+  glm::vec3 cameraDir = glm::normalize(g::cameraPos - g::cameraTarget);
+  glm::vec3 up = glm::vec3(0.0f, 0.0f, 1.0f);
+  glm::vec3 cameraRight = glm::normalize(glm::cross(up, cameraDir));
+  glm::vec3 cameraUp = glm::cross(cameraDir, cameraRight);
+  glm::mat4 view = glm::lookAt(g::cameraPos, g::cameraTarget, cameraUp);
+  return view;
+}
 
 const float MAX_FLOAT = std::numeric_limits<float>::infinity();
 const float MIN_FLOAT = -std::numeric_limits<float>::infinity();
@@ -266,7 +308,7 @@ __device__ bool rayTriangleIntersect(const glm::vec3 &orig,
 
 __global__ void raycast(size_t nIndices, float *vertices, unsigned int *indices,
                         unsigned char *output, glm::ivec3 dims,
-                        glm::vec3 offset, float vxlSize) {
+                        glm::vec3 offset, float voxelSize) {
   int index = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
   int n = dims[0] * dims[1] * dims[2];
@@ -275,7 +317,7 @@ __global__ void raycast(size_t nIndices, float *vertices, unsigned int *indices,
     int i = v / dims[1] / dims[2];
     int j = (v / dims[2]) % dims[1];
     int k = v % dims[2];
-    glm::vec3 pos = offset + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * vxlSize;
+    glm::vec3 pos = offset + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * voxelSize;
 
     glm::vec3 vert[3];
     for (int idx = 0; idx < nIndices; idx += 3) {
@@ -302,6 +344,48 @@ struct cuMesh {
   }
 };
 
+struct RigidBody {
+  glm::vec3 pos; // center of mass
+  glm::quat quat;
+  glm::vec3 V, W;
+};
+
+std::vector<glm::vec3>
+getRelativePositions(const RigidBody &body,
+                     const std::vector<glm::vec3> &initialRelativePositions) {
+  std::vector<glm::vec3> relativePositions;
+  std::transform(
+      initialRelativePositions.cbegin(), initialRelativePositions.cend(),
+      std::back_inserter(relativePositions),
+      [&body](const glm::vec3 &initialRelativePos) {
+        return body.quat * initialRelativePos * glm::conjugate(body.quat);
+      });
+  return relativePositions;
+}
+
+std::vector<glm::vec3>
+getPositions(const RigidBody &body,
+             const std::vector<glm::vec3> &relativePositions) {
+  std::vector<glm::vec3> positions;
+  std::transform(
+      relativePositions.cbegin(), relativePositions.cend(),
+      std::back_inserter(positions),
+      [&body](const glm::vec3 &relativePos) { return body.pos + relativePos; });
+  return positions;
+}
+
+std::vector<glm::vec3>
+getVelocities(const RigidBody &body,
+              const std::vector<glm::vec3> &relativePositions) {
+  std::vector<glm::vec3> velocities;
+  std::transform(relativePositions.cbegin(), relativePositions.cend(),
+                 std::back_inserter(velocities),
+                 [&body](const glm::vec3 &relativePos) {
+                   return body.V + glm::cross(body.W, relativePos);
+                 });
+  return velocities;
+}
+
 int main(int argc, char *argp[]) {
   assert(argc == 3);
   Mesh bear = importModel(std::string(argp[1]));
@@ -314,11 +398,11 @@ int main(int argc, char *argp[]) {
   Box3 ballBBox = computeBBox(ball.vertices);
 
   float ballScale = max3(ballBBox.getSize());
-  float vxlSize = min3(bearBBox.getSize()) / (float)g::discretization;
+  float voxelSize = min3(bearBBox.getSize()) / (float)g::discretization;
 
   cuMesh cuBear(bear);
 
-  glm::ivec3 dims = glm::ivec3(bearBBox.getSize() / vxlSize);
+  glm::ivec3 dims = glm::ivec3(bearBBox.getSize() / voxelSize);
 
   int N = dims[0] * dims[1] * dims[2];
   unsigned char *voxels;
@@ -329,60 +413,46 @@ int main(int argc, char *argp[]) {
   int numBlocks = (N + blockSize - 1) / blockSize;
   raycast<<<numBlocks, blockSize>>>(bear.indices.size(), cuBear.vertices,
                                     cuBear.indices, voxels, dims, bearBBox.min,
-                                    vxlSize);
+                                    voxelSize);
   cudaDeviceSynchronize();
 
-  std::vector<glm::mat4> ballPositions;
+  std::vector<glm::vec3> particleInitialRelativePositions;
   for (int i = 0; i < dims[0]; ++i) {
     for (int j = 0; j < dims[1]; ++j) {
       for (int k = 0; k < dims[2]; ++k) {
         if (voxels[i * dims[1] * dims[2] + j * dims[2] + k] % 2 == 0)
           continue;
-        glm::vec3 pos =
-            bearBBox.min + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * vxlSize;
-        ballPositions.push_back(glm::scale(glm::translate(glm::mat4(1.0), pos),
-                                           glm::vec3(vxlSize / ballScale)));
+        glm::vec3 pos = bearBBox.min +
+                        (glm::vec3(i, j, k) + glm::vec3(0.5f)) * voxelSize -
+                        bearBBox.getCenter();
+        particleInitialRelativePositions.push_back(pos);
       }
     }
   }
+
+  std::vector<glm::vec3> particleRelativePositions;
+  std::vector<glm::vec3> particlePositions;
+  {
+    RigidBody body;
+    body.quat = glm::angleAxis(glm::radians(45.f), glm::vec3(1.f, 0.f, 0.f));
+    particleRelativePositions =
+        getRelativePositions(body, particleInitialRelativePositions);
+    particlePositions = getPositions(body, particleRelativePositions);
+  }
+
   std::vector<glm::mat4> bearMatrices{glm::mat4(1.0)};
-
-  const char *vertexShaderSrc =
-      "#version 330 core\n"
-      "layout (location = 0) in vec3 aPos;\n"
-      "layout (location = 1) in vec3 aNormal;\n"
-      "layout (location = 2) in mat4 aModel;\n"
-      "uniform mat4 view;\n"
-      "uniform mat4 projection;\n"
-      "out vec3 FragPos;\n"
-      "out vec3 Normal;\n"
-      "void main() {\n"
-      "  gl_Position = projection * view * aModel * vec4(aPos, 1.0);\n"
-      "  vec3 normal = normalize(aNormal);\n"
-      "  Normal = mat3(transpose(inverse(aModel))) * normal;"
-      "  FragPos = vec3(aModel * vec4(aPos, 1.0));\n"
-      "}\0";
-
-  const char *fragmentShaderSrc =
-      "#version 330 core\n"
-      "uniform vec3 lightPos;\n"
-      "in vec3 FragPos;\n"
-      "in vec3 Normal;\n"
-      "out vec4 FragColor;\n"
-      "void main() {\n"
-      "  vec3 lightColor = vec3(0.5, 0.1, 0.5);\n"
-      "  vec3 lightDir = normalize(lightPos - FragPos);\n"
-      "  float diff = max(0.0, dot(Normal, lightDir));\n"
-      "  vec3 diffuse = diff * lightColor;\n"
-      "  float ambientStrength = 0.5;\n"
-      "  vec3 ambient = ambientStrength * lightColor;\n"
-      "  FragColor = vec4(ambient + diffuse, 0.0);\n"
-      "}\0";
+  std::vector<glm::mat4> particleMatrices;
+  std::transform(particlePositions.cbegin(), particlePositions.cend(),
+                 std::back_inserter(particleMatrices),
+                 [&bearBBox, voxelSize, ballScale](const glm::vec3 &position) {
+                   return glm::scale(glm::translate(glm::mat4(1.0), position),
+                                     glm::vec3(voxelSize / ballScale));
+                 });
 
   GLuint shader = compileShader(vertexShaderSrc, fragmentShaderSrc);
 
   OpenGLObject bearGL = bindModel(bear, bearMatrices);
-  OpenGLObject ballGL = bindModel(ball, ballPositions);
+  OpenGLObject ballGL = bindModel(ball, particleMatrices);
   glm::mat4 projection =
       glm::perspective(glm::radians(60.0f), g::aspect, 0.1f, 1000.0f);
 
@@ -391,11 +461,7 @@ int main(int argc, char *argp[]) {
     glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glm::vec3 cameraDir = glm::normalize(g::cameraPos - g::cameraTarget);
-    glm::vec3 up = glm::vec3(0.0f, 0.0f, 1.0f);
-    glm::vec3 cameraRight = glm::normalize(glm::cross(up, cameraDir));
-    glm::vec3 cameraUp = glm::cross(cameraDir, cameraRight);
-    glm::mat4 view = glm::lookAt(g::cameraPos, g::cameraTarget, cameraUp);
+    glm::mat4 view = getCameraView();
 
     glUseProgram(shader);
     glUniformMatrix4fv(glGetUniformLocation(shader, "projection"), 1, GL_FALSE,
@@ -414,7 +480,7 @@ int main(int argc, char *argp[]) {
     if (showBearBalls & 0b10) {
       glBindVertexArray(ballGL.vao);
       glDrawElementsInstanced(GL_TRIANGLES, ball.indices.size(),
-                              GL_UNSIGNED_INT, 0, ballPositions.size());
+                              GL_UNSIGNED_INT, 0, particleMatrices.size());
     }
 
     glfwSwapBuffers(window);
