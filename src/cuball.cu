@@ -14,6 +14,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/intersect.hpp>
+#include <glm/gtx/quaternion.hpp>
 #include <glm/gtx/string_cast.hpp>
 #include <limits>
 #include <stdio.h>
@@ -24,8 +25,10 @@ const unsigned int SCR_WIDTH = 1920;
 const unsigned int SCR_HEIGHT = 1080;
 glm::vec3 cameraPos = glm::vec3(0.0f, -200.0f, 00.0f);
 glm::vec3 cameraTarget = glm::vec3(0.0f, 0.0f, 00.0f);
-int discretization = 30;
 float aspect = (float)SCR_WIDTH / SCR_HEIGHT;
+glm::mat4 projection =
+    glm::perspective(glm::radians(60.0f), aspect, 0.1f, 1000.0f);
+int discretization = 30;
 } // namespace g
 
 const char *vertexShaderSrc =
@@ -231,57 +234,58 @@ void processInput(GLFWwindow *window) {
 
 struct OpenGLObject {
   GLuint vbo, vao, ebo, instanceVBO;
+  OpenGLObject(const Mesh &mesh, std::vector<glm::mat4> &models) {
+    glGenBuffers(1, &vbo);
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &ebo);
+    glGenBuffers(1, &instanceVBO);
+
+    glBindVertexArray(vao);
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * mesh.vertices.size(),
+                 mesh.vertices.data(), GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                 sizeof(mesh.indices[0]) * mesh.indices.size(),
+                 mesh.indices.data(), GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                          (void *)0);
+    glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
+                          (void *)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    bindMatrices(models);
+  }
+
   void release() {
     glDeleteBuffers(1, &vbo);
     glDeleteVertexArrays(1, &vao);
     glDeleteBuffers(1, &ebo);
     glDeleteBuffers(1, &instanceVBO);
   }
-};
 
-OpenGLObject bindModel(Mesh &iMesh, std::vector<glm::mat4> &models) {
-  OpenGLObject openGLObject;
-  glGenBuffers(1, &openGLObject.vbo);
-  glGenVertexArrays(1, &openGLObject.vao);
-  glGenBuffers(1, &openGLObject.ebo);
-  glGenBuffers(1, &openGLObject.instanceVBO);
+  void bindMatrices(std::vector<glm::mat4> &models) {
+    glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(glm::mat4) * models.size(), &models[0],
+                 GL_STATIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-  glBindVertexArray(openGLObject.vao);
-
-  glBindBuffer(GL_ARRAY_BUFFER, openGLObject.vbo);
-  glBufferData(GL_ARRAY_BUFFER, sizeof(float) * iMesh.vertices.size(),
-               iMesh.vertices.data(), GL_STATIC_DRAW);
-
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, openGLObject.ebo);
-  glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-               sizeof(iMesh.indices[0]) * iMesh.indices.size(),
-               iMesh.indices.data(), GL_STATIC_DRAW);
-
-  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *)0);
-  glEnableVertexAttribArray(0);
-
-  glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float),
-                        (void *)(3 * sizeof(float)));
-  glEnableVertexAttribArray(1);
-
-  glBindBuffer(GL_ARRAY_BUFFER, openGLObject.instanceVBO);
-  glBufferData(GL_ARRAY_BUFFER, sizeof(glm::mat4) * models.size(), &models[0],
-               GL_STATIC_DRAW);
-  glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-  glBindBuffer(GL_ARRAY_BUFFER, openGLObject.instanceVBO);
-  for (int pos = 0; pos < 4; ++pos) {
-    glEnableVertexAttribArray(pos + 2);
-    glVertexAttribPointer(pos + 2, 4, GL_FLOAT, GL_FALSE,
-                          sizeof(GLfloat) * 4 * 4,
-                          (void *)(sizeof(float) * pos * 4));
-    glVertexAttribDivisor(pos + 2, 1);
+    glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+    for (int pos = 0; pos < 4; ++pos) {
+      glEnableVertexAttribArray(pos + 2);
+      glVertexAttribPointer(pos + 2, 4, GL_FLOAT, GL_FALSE,
+                            sizeof(GLfloat) * 4 * 4,
+                            (void *)(sizeof(float) * pos * 4));
+      glVertexAttribDivisor(pos + 2, 1);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
   }
-  glBindBuffer(GL_ARRAY_BUFFER, 0);
-  glBindVertexArray(0);
-
-  return openGLObject;
-}
+};
 
 __device__ bool rayTriangleIntersect(const glm::vec3 &orig,
                                      const glm::vec3 &dir,
@@ -345,33 +349,48 @@ struct cuMesh {
 };
 
 struct RigidBody {
-  glm::vec3 pos; // center of mass
-  glm::quat quat;
-  glm::vec3 V, W;
+  glm::vec3 pos = glm::vec3(0, 0, 0); // center of mass
+  glm::quat quat = glm::quat(1, 0, 0, 0);
+  glm::vec3 V = glm::vec3(0, 0, 0);
+  glm::vec3 W = glm::vec3(0, 0, 0);
+
+  std::vector<glm::vec3> getRelativePositions(
+      const std::vector<glm::vec3> &initialRelativePositions) const {
+    std::vector<glm::vec3> relativePositions;
+    std::transform(initialRelativePositions.cbegin(),
+                   initialRelativePositions.cend(),
+                   std::back_inserter(relativePositions),
+                   [this](const glm::vec3 &initialRelativePos) {
+                     return quat * initialRelativePos * glm::conjugate(quat);
+                   });
+    return relativePositions;
+  }
+
+  std::vector<glm::vec3>
+  getPositions(const std::vector<glm::vec3> &relativePositions) const {
+    std::vector<glm::vec3> positions;
+    std::transform(
+        relativePositions.cbegin(), relativePositions.cend(),
+        std::back_inserter(positions),
+        [this](const glm::vec3 &relativePos) { return pos + relativePos; });
+    return positions;
+  }
+
+  glm::mat4 getWorldMatrix() {
+    return glm::translate(glm::mat4(1.0), pos) * glm::toMat4(quat);
+  }
 };
 
-std::vector<glm::vec3>
-getRelativePositions(const RigidBody &body,
-                     const std::vector<glm::vec3> &initialRelativePositions) {
-  std::vector<glm::vec3> relativePositions;
-  std::transform(
-      initialRelativePositions.cbegin(), initialRelativePositions.cend(),
-      std::back_inserter(relativePositions),
-      [&body](const glm::vec3 &initialRelativePos) {
-        return body.quat * initialRelativePos * glm::conjugate(body.quat);
-      });
-  return relativePositions;
-}
-
-std::vector<glm::vec3>
-getPositions(const RigidBody &body,
-             const std::vector<glm::vec3> &relativePositions) {
-  std::vector<glm::vec3> positions;
-  std::transform(
-      relativePositions.cbegin(), relativePositions.cend(),
-      std::back_inserter(positions),
-      [&body](const glm::vec3 &relativePos) { return body.pos + relativePos; });
-  return positions;
+std::vector<glm::mat4>
+getParticleMatrices(const std::vector<glm::vec3> &positions, float ballScale) {
+  std::vector<glm::mat4> matrices;
+  std::transform(positions.cbegin(), positions.cend(),
+                 std::back_inserter(matrices),
+                 [ballScale](const glm::vec3 &position) {
+                   return glm::scale(glm::translate(glm::mat4(1.0), position),
+                                     glm::vec3(ballScale));
+                 });
+  return matrices;
 }
 
 std::vector<glm::vec3>
@@ -397,8 +416,8 @@ int main(int argc, char *argp[]) {
   Box3 bearBBox = computeBBox(bear.vertices);
   Box3 ballBBox = computeBBox(ball.vertices);
 
-  float ballScale = max3(ballBBox.getSize());
   float voxelSize = min3(bearBBox.getSize()) / (float)g::discretization;
+  float ballScale = voxelSize / max3(ballBBox.getSize());
 
   cuMesh cuBear(bear);
 
@@ -432,29 +451,39 @@ int main(int argc, char *argp[]) {
 
   std::vector<glm::vec3> particleRelativePositions;
   std::vector<glm::vec3> particlePositions;
-  {
-    RigidBody body;
-    body.quat = glm::angleAxis(glm::radians(45.f), glm::vec3(1.f, 0.f, 0.f));
-    particleRelativePositions =
-        getRelativePositions(body, particleInitialRelativePositions);
-    particlePositions = getPositions(body, particleRelativePositions);
-  }
 
-  std::vector<glm::mat4> bearMatrices{glm::mat4(1.0)};
-  std::vector<glm::mat4> particleMatrices;
-  std::transform(particlePositions.cbegin(), particlePositions.cend(),
-                 std::back_inserter(particleMatrices),
-                 [&bearBBox, voxelSize, ballScale](const glm::vec3 &position) {
-                   return glm::scale(glm::translate(glm::mat4(1.0), position),
-                                     glm::vec3(voxelSize / ballScale));
-                 });
+  std::vector<glm::mat4> bearMatrices;
+  std::vector<glm::mat4> mergedParticleMatrices;
+
+  std::vector<RigidBody> bears = {{.pos = glm::vec3(0, 0, 0),
+                                   .quat = glm::quat(1, 0, 0, 0),
+                                   .V = glm::vec3(0, 0, 0),
+                                   .W = glm::vec3(0, 0, 0)},
+                                  {.pos = glm::vec3(50, 0, 0),
+                                   .quat = glm::quat(1, 0, 0, 0),
+                                   .V = glm::vec3(0, 0, 0),
+                                   .W = glm::vec3(0, 0, 0)},
+                                  {.pos = glm::vec3(-50, 0, 0),
+                                   .quat = glm::quat(1, 0, 0, 0),
+                                   .V = glm::vec3(0, 0, 0),
+                                   .W = glm::vec3(0, 0, 0)}};
+  for (auto freddy : bears) {
+    particleRelativePositions =
+        freddy.getRelativePositions(particleInitialRelativePositions);
+    particlePositions = freddy.getPositions(particleRelativePositions);
+    std::vector<glm::mat4> particleMatrices =
+        getParticleMatrices(particlePositions, ballScale);
+
+    mergedParticleMatrices.insert(mergedParticleMatrices.end(),
+                                  particleMatrices.begin(),
+                                  particleMatrices.end());
+    bearMatrices.push_back(freddy.getWorldMatrix());
+  }
 
   GLuint shader = compileShader(vertexShaderSrc, fragmentShaderSrc);
 
-  OpenGLObject bearGL = bindModel(bear, bearMatrices);
-  OpenGLObject ballGL = bindModel(ball, particleMatrices);
-  glm::mat4 projection =
-      glm::perspective(glm::radians(60.0f), g::aspect, 0.1f, 1000.0f);
+  OpenGLObject bearGL(bear, bearMatrices);
+  OpenGLObject ballGL(ball, mergedParticleMatrices);
 
   while (!glfwWindowShouldClose(window)) {
     processInput(window);
@@ -465,22 +494,27 @@ int main(int argc, char *argp[]) {
 
     glUseProgram(shader);
     glUniformMatrix4fv(glGetUniformLocation(shader, "projection"), 1, GL_FALSE,
-                       glm::value_ptr(projection));
+                       glm::value_ptr(g::projection));
     glUniformMatrix4fv(glGetUniformLocation(shader, "view"), 1, GL_FALSE,
                        glm::value_ptr(view));
     glUniform3fv(glGetUniformLocation(shader, "lightPos"), 1,
                  glm::value_ptr(g::cameraPos));
 
+    ballGL.bindMatrices(mergedParticleMatrices);
+
     if (showBearBalls & 0b01) {
       glBindVertexArray(bearGL.vao);
       glDrawElementsInstanced(GL_TRIANGLES, bear.indices.size(),
                               GL_UNSIGNED_INT, 0, bearMatrices.size());
+      glBindVertexArray(0);
     }
 
     if (showBearBalls & 0b10) {
       glBindVertexArray(ballGL.vao);
       glDrawElementsInstanced(GL_TRIANGLES, ball.indices.size(),
-                              GL_UNSIGNED_INT, 0, particleMatrices.size());
+                              GL_UNSIGNED_INT, 0,
+                              mergedParticleMatrices.size());
+      glBindVertexArray(0);
     }
 
     glfwSwapBuffers(window);
