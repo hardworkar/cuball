@@ -24,6 +24,7 @@ const unsigned int SCR_HEIGHT = 1080;
 glm::vec3 cameraPos = glm::vec3(0.0f, -200.0f, 00.0f);
 glm::vec3 cameraTarget = glm::vec3(0.0f, 0.0f, 00.0f);
 int discretization = 30;
+float aspect = (float)SCR_WIDTH / SCR_HEIGHT;
 } // namespace g
 
 const float MAX_FLOAT = std::numeric_limits<float>::infinity();
@@ -50,12 +51,12 @@ struct Box3 {
   glm::vec3 max;
 };
 
-Box3 computeBBox(const std::vector<float> &iVerticesWithNormals) {
+Box3 computeBBox(const std::vector<float> &verticesWithNormals) {
   Box3 out;
-  for (int i = 0; i < iVerticesWithNormals.size() / 6; ++i) {
+  for (int i = 0; i < verticesWithNormals.size() / 6; ++i) {
     glm::vec3 vertex =
-        glm::vec3(iVerticesWithNormals[6 * i], iVerticesWithNormals[6 * i + 1],
-                  iVerticesWithNormals[6 * i + 2]);
+        glm::vec3(verticesWithNormals[6 * i], verticesWithNormals[6 * i + 1],
+                  verticesWithNormals[6 * i + 2]);
     out.expandByPoint(vertex);
   }
   return out;
@@ -263,30 +264,43 @@ __device__ bool rayTriangleIntersect(const glm::vec3 &orig,
   return true;
 }
 
-__global__ void raycast(size_t indicesSize, float *gpuVertices,
-                        unsigned int *gpuIndices, unsigned char *gpuOutput,
-                        unsigned int mi, unsigned int mj, unsigned int mk,
+__global__ void raycast(size_t nIndices, float *vertices, unsigned int *indices,
+                        unsigned char *output, glm::ivec3 dims,
                         glm::vec3 offset, float vxlSize) {
   int index = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
-  int n = mi * mj * mk;
+  int n = dims[0] * dims[1] * dims[2];
 
   for (int v = index; v < n; v += stride) {
-    int i = v / mj / mk;
-    int j = (v / mk) % mj;
-    int k = v % mk;
+    int i = v / dims[1] / dims[2];
+    int j = (v / dims[2]) % dims[1];
+    int k = v % dims[2];
     glm::vec3 pos = offset + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * vxlSize;
 
     glm::vec3 vert[3];
-    for (int idx = 0; idx < indicesSize; idx += 3) {
+    for (int idx = 0; idx < nIndices; idx += 3) {
       for (int verti = 0; verti < 3; ++verti)
         for (int vertj = 0; vertj < 3; ++vertj)
-          vert[verti][vertj] = gpuVertices[3 * gpuIndices[idx + verti] + vertj];
+          vert[verti][vertj] = vertices[3 * indices[idx + verti] + vertj];
       float t;
-      gpuOutput[v] += rayTriangleIntersect(pos, glm::vec3(0, 0, 1), vert, t);
+      output[v] += rayTriangleIntersect(pos, glm::vec3(0, 0, 1), vert, t);
     }
   }
 }
+
+struct cuMesh {
+  float *vertices;
+  unsigned int *indices;
+  cuMesh(const Mesh &iMesh) {
+    cudaMallocManaged(&vertices, iMesh.vertices.size() / 2 * sizeof(float));
+    cudaMallocManaged(&indices, iMesh.indices.size() * sizeof(unsigned int));
+    for (int i = 0; i < iMesh.vertices.size() / 6; ++i)
+      for (int j = 0; j < 3; ++j)
+        vertices[i * 3 + j] = iMesh.vertices[i * 6 + j];
+    std::memcpy(indices, iMesh.indices.data(),
+                iMesh.indices.size() * sizeof(iMesh.indices[0]));
+  }
+};
 
 int main(int argc, char *argp[]) {
   assert(argc == 3);
@@ -300,43 +314,34 @@ int main(int argc, char *argp[]) {
   Box3 ballBBox = computeBBox(ball.vertices);
 
   float ballScale = max3(ballBBox.getSize());
-  float vxlSize = min3(bearBBox.getSize() / (float)g::discretization);
+  float vxlSize = min3(bearBBox.getSize()) / (float)g::discretization;
 
-  float *gpuVertices;
-  unsigned int *gpuIndices;
-  cudaMallocManaged(&gpuVertices, bear.vertices.size() / 2 * sizeof(float));
-  cudaMallocManaged(&gpuIndices, bear.indices.size() * sizeof(unsigned int));
-  for (int i = 0; i < bear.vertices.size() / 6; ++i)
-    for (int j = 0; j < 3; ++j)
-      gpuVertices[i * 3 + j] = bear.vertices[i * 6 + j];
-  std::memcpy(gpuIndices, bear.indices.data(),
-              bear.indices.size() * sizeof(bear.indices[0]));
+  cuMesh cuBear(bear);
 
-  std::vector<glm::mat4> relativePositions;
   glm::ivec3 dims = glm::ivec3(bearBBox.getSize() / vxlSize);
 
   int N = dims[0] * dims[1] * dims[2];
-  unsigned char *gpuOutput;
-  cudaMallocManaged(&gpuOutput, N * sizeof(unsigned char));
-  memset(gpuOutput, 0, N * sizeof(unsigned char));
+  unsigned char *voxels;
+  cudaMallocManaged(&voxels, N * sizeof(unsigned char));
+  memset(voxels, 0, N * sizeof(unsigned char));
 
   int blockSize = 256;
   int numBlocks = (N + blockSize - 1) / blockSize;
-  raycast<<<numBlocks, blockSize>>>(bear.indices.size(), gpuVertices,
-                                    gpuIndices, gpuOutput, dims[0], dims[1],
-                                    dims[2], bearBBox.min, vxlSize);
+  raycast<<<numBlocks, blockSize>>>(bear.indices.size(), cuBear.vertices,
+                                    cuBear.indices, voxels, dims, bearBBox.min,
+                                    vxlSize);
   cudaDeviceSynchronize();
 
+  std::vector<glm::mat4> ballPositions;
   for (int i = 0; i < dims[0]; ++i) {
     for (int j = 0; j < dims[1]; ++j) {
       for (int k = 0; k < dims[2]; ++k) {
-        if (gpuOutput[i * dims[1] * dims[2] + j * dims[2] + k] % 2 == 0)
+        if (voxels[i * dims[1] * dims[2] + j * dims[2] + k] % 2 == 0)
           continue;
         glm::vec3 pos =
             bearBBox.min + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * vxlSize;
-        relativePositions.push_back(
-            glm::scale(glm::translate(glm::mat4(1.0), pos),
-                       glm::vec3(vxlSize / ballScale)));
+        ballPositions.push_back(glm::scale(glm::translate(glm::mat4(1.0), pos),
+                                           glm::vec3(vxlSize / ballScale)));
       }
     }
   }
@@ -377,9 +382,9 @@ int main(int argc, char *argp[]) {
   GLuint shader = compileShader(vertexShaderSrc, fragmentShaderSrc);
 
   OpenGLObject bearGL = bindModel(bear, bearMatrices);
-  OpenGLObject ballGL = bindModel(ball, relativePositions);
-  glm::mat4 projection = glm::perspective(
-      glm::radians(60.0f), (float)g::SCR_WIDTH / g::SCR_HEIGHT, 0.1f, 1000.0f);
+  OpenGLObject ballGL = bindModel(ball, ballPositions);
+  glm::mat4 projection =
+      glm::perspective(glm::radians(60.0f), g::aspect, 0.1f, 1000.0f);
 
   while (!glfwWindowShouldClose(window)) {
     processInput(window);
@@ -409,7 +414,7 @@ int main(int argc, char *argp[]) {
     if (showBearBalls & 0b10) {
       glBindVertexArray(ballGL.vao);
       glDrawElementsInstanced(GL_TRIANGLES, ball.indices.size(),
-                              GL_UNSIGNED_INT, 0, relativePositions.size());
+                              GL_UNSIGNED_INT, 0, ballPositions.size());
     }
 
     glfwSwapBuffers(window);
