@@ -142,17 +142,16 @@ unsigned int showBearBalls = 0b01;
 void processInput(GLFWwindow *window) {
   if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
     glfwSetWindowShouldClose(window, true);
-  auto &cameraPos = g::cameraPos;
-  float r = sqrt(cameraPos.x * cameraPos.x + cameraPos.y * cameraPos.y);
-  float phi = atan2(cameraPos.y, cameraPos.x);
+  float r2 = g::cameraPos.x * g::cameraPos.x + g::cameraPos.y * g::cameraPos.y;
+  float phi = atan2(g::cameraPos.y, g::cameraPos.x);
 
   float rDiff = (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) -
                 (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS);
-  r += rDiff * 0.3;
+  float r = sqrt(r2) + rDiff * 0.3;
   float phiDiff = (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) -
                   (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
   phi += phiDiff * 0.1;
-  cameraPos = glm::vec3(r * cos(phi), r * sin(phi), cameraPos.z);
+  g::cameraPos = glm::vec3(r * cos(phi), r * sin(phi), g::cameraPos.z);
 
   static bool lastBState = true;
   bool currState = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
@@ -277,14 +276,13 @@ int main(int argc, char *argp[]) {
   unsigned int *gpuIndices;
   cudaMallocManaged(&gpuVertices, bearVertexData.size() / 2 * sizeof(float));
   cudaMallocManaged(&gpuIndices, bearIndices.size() * sizeof(unsigned int));
-  for (int i = 0; i < bearVertexData.size() / 6; ++i) {
+  for (int i = 0; i < bearVertexData.size() / 6; ++i)
     for (int j = 0; j < 3; ++j)
       gpuVertices[i * 3 + j] = bearVertexData[i * 6 + j];
-  }
   std::memcpy(gpuIndices, bearIndices.data(),
               bearIndices.size() * sizeof(bearIndices[0]));
 
-  std::vector<glm::mat4> ballMatrices;
+  std::vector<glm::mat4> relativePositions;
   glm::ivec3 dims = glm::ivec3((bearBBox.second - bearBBox.first) / vxlSize);
 
   int N = dims[0] * dims[1] * dims[2];
@@ -305,8 +303,9 @@ int main(int argc, char *argp[]) {
         glm::vec3 pos =
             bearBBox.first + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * vxlSize;
         if (gpuOutput[i * dims[1] * dims[2] + j * dims[2] + k] % 2)
-          ballMatrices.push_back(glm::scale(glm::translate(glm::mat4(1.0), pos),
-                                            glm::vec3(vxlSize / ballScale)));
+          relativePositions.push_back(
+              glm::scale(glm::translate(glm::mat4(1.0), pos),
+                         glm::vec3(vxlSize / ballScale)));
       }
     }
   }
@@ -349,7 +348,7 @@ int main(int argc, char *argp[]) {
   auto [bearVAO, bearVBO] =
       bindModel(bearVertexData, bearIndices, bearMatrices);
   auto [ballVAO, ballVBO] =
-      bindModel(ballVertexData, ballIndices, ballMatrices);
+      bindModel(ballVertexData, ballIndices, relativePositions);
   glm::mat4 projection = glm::perspective(
       glm::radians(60.0f), (float)g::SCR_WIDTH / g::SCR_HEIGHT, 0.1f, 1000.0f);
 
@@ -381,7 +380,7 @@ int main(int argc, char *argp[]) {
     if (showBearBalls & 0b10) {
       glBindVertexArray(ballVAO);
       glDrawElementsInstanced(GL_TRIANGLES, ballIndices.size(), GL_UNSIGNED_INT,
-                              0, ballMatrices.size());
+                              0, relativePositions.size());
     }
 
     glfwSwapBuffers(window);
