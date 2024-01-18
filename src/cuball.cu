@@ -26,20 +26,48 @@ glm::vec3 cameraTarget = glm::vec3(0.0f, 0.0f, 00.0f);
 int discretization = 30;
 } // namespace g
 
-std::pair<glm::vec3, glm::vec3>
-computeBBox(const std::vector<float> &iVerticesWithNormals) {
-  std::pair<glm::vec3, glm::vec3> b = {glm::vec3(1e6), glm::vec3(-1e6)};
-  for (int i = 0; i < iVerticesWithNormals.size() / 6; ++i) {
-    for (int j = 0; j < 3; ++j) {
-      b.first[j] = std::min(b.first[j], iVerticesWithNormals[6 * i + j]);
-      b.second[j] = std::max(b.second[j], iVerticesWithNormals[6 * i + j]);
+const float MAX_FLOAT = std::numeric_limits<float>::infinity();
+const float MIN_FLOAT = -std::numeric_limits<float>::infinity();
+
+float max3(const glm::vec3 &v) { return std::max(std::max(v.x, v.y), v.z); }
+float min3(const glm::vec3 &v) { return std::min(std::min(v.x, v.y), v.z); }
+
+struct Box3 {
+  Box3() {
+    min = glm::vec3(MAX_FLOAT, MAX_FLOAT, MAX_FLOAT);
+    max = glm::vec3(MIN_FLOAT, MIN_FLOAT, MIN_FLOAT);
+  }
+  Box3(const glm::vec3 &iMin, const glm::vec3 &iMax) : min(iMin), max(iMax) {}
+  glm::vec3 getCenter() { return (max + min) / 2.0f; }
+  glm::vec3 getSize() { return max - min; }
+  void expandByPoint(const glm::vec3 &iPoint) {
+    for (int i = 0; i < 3; ++i) {
+      min[i] = std::min(min[i], iPoint[i]);
+      max[i] = std::max(max[i], iPoint[i]);
     }
   }
-  return b;
+
+  glm::vec3 min;
+  glm::vec3 max;
+};
+
+Box3 computeBBox(const std::vector<float> &iVerticesWithNormals) {
+  Box3 out;
+  for (int i = 0; i < iVerticesWithNormals.size() / 6; ++i) {
+    glm::vec3 vertex =
+        glm::vec3(iVerticesWithNormals[6 * i], iVerticesWithNormals[6 * i + 1],
+                  iVerticesWithNormals[6 * i + 2]);
+    out.expandByPoint(vertex);
+  }
+  return out;
 }
 
-std::pair<std::vector<float>, std::vector<unsigned int>>
-importModel(const std::string &iFilename) {
+struct Mesh {
+  std::vector<float> vertices;
+  std::vector<unsigned int> indices;
+};
+
+Mesh importModel(const std::string &iFilename) {
   static Assimp::Importer importer;
   const aiScene *scene = importer.ReadFile(
       iFilename, aiProcess_CalcTangentSpace | aiProcess_JoinIdenticalVertices |
@@ -51,26 +79,25 @@ importModel(const std::string &iFilename) {
   printf("Loaded model '%s': faces: %d vertices: %d\n", iFilename.c_str(),
          mesh->mNumFaces, mesh->mNumVertices);
 
-  std::vector<float> vertices;
-  vertices.reserve(mesh->mNumVertices * 3 * 2);
+  Mesh outMesh;
+  outMesh.vertices.reserve(mesh->mNumVertices * 3 * 2);
   for (int i = 0; i < mesh->mNumVertices; ++i) {
     for (int j = 0; j < 3; ++j)
-      vertices.push_back(mesh->mVertices[i][j]);
+      outMesh.vertices.push_back(mesh->mVertices[i][j]);
     for (int j = 0; j < 3; ++j)
-      vertices.push_back(mesh->mNormals[i][j]);
+      outMesh.vertices.push_back(mesh->mNormals[i][j]);
   }
-  std::pair<glm::vec3, glm::vec3> bbox = computeBBox(vertices);
-  glm::vec3 bboxCenter = (bbox.first + bbox.second) / 2.0f;
+  Box3 box = computeBBox(outMesh.vertices);
+  glm::vec3 bboxCenter = box.getCenter();
   for (int i = 0; i < mesh->mNumVertices; ++i)
     for (int j = 0; j < 3; ++j)
-      vertices[6 * i + j] -= bboxCenter[j];
+      outMesh.vertices[6 * i + j] -= bboxCenter[j];
 
-  std::vector<unsigned int> indices;
-  indices.reserve(mesh->mNumFaces * 3);
+  outMesh.indices.reserve(mesh->mNumFaces * 3);
   for (int i = 0; i < mesh->mNumFaces; ++i)
     for (int j = 0; j < 3; ++j)
-      indices.push_back(mesh->mFaces[i].mIndices[j]);
-  return {vertices, indices};
+      outMesh.indices.push_back(mesh->mFaces[i].mIndices[j]);
+  return outMesh;
 }
 
 void framebuffer_size_callback(GLFWwindow *window, int width, int height) {
@@ -255,35 +282,30 @@ __global__ void raycast(size_t indicesSize, float *gpuVertices,
 
 int main(int argc, char *argp[]) {
   assert(argc == 3);
-  auto [bearVertexData, bearIndices] = importModel(std::string(argp[1]));
-  auto [ballVertexData, ballIndices] = importModel(std::string(argp[2]));
+  Mesh bear = importModel(std::string(argp[1]));
+  Mesh ball = importModel(std::string(argp[2]));
 
   GLFWwindow *window = initGLFW();
   assert(window);
 
-  std::pair<glm::vec3, glm::vec3> bearBBox = computeBBox(bearVertexData);
-  std::pair<glm::vec3, glm::vec3> ballBBox = computeBBox(ballVertexData);
-  float ballScale = std::numeric_limits<float>::min();
-  for (int i = 0; i < 3; ++i)
-    ballScale = std::max(ballScale, ballBBox.second[i] - ballBBox.first[i]);
+  Box3 bearBBox = computeBBox(bear.vertices);
+  Box3 ballBBox = computeBBox(ball.vertices);
 
-  float vxlSize = std::numeric_limits<float>::max();
-  for (int i = 0; i < 3; ++i)
-    vxlSize = std::min(vxlSize, (bearBBox.second[i] - bearBBox.first[i]) /
-                                    g::discretization);
+  float ballScale = max3(ballBBox.getSize());
+  float vxlSize = min3(bearBBox.getSize() / (float)g::discretization);
 
   float *gpuVertices;
   unsigned int *gpuIndices;
-  cudaMallocManaged(&gpuVertices, bearVertexData.size() / 2 * sizeof(float));
-  cudaMallocManaged(&gpuIndices, bearIndices.size() * sizeof(unsigned int));
-  for (int i = 0; i < bearVertexData.size() / 6; ++i)
+  cudaMallocManaged(&gpuVertices, bear.vertices.size() / 2 * sizeof(float));
+  cudaMallocManaged(&gpuIndices, bear.indices.size() * sizeof(unsigned int));
+  for (int i = 0; i < bear.vertices.size() / 6; ++i)
     for (int j = 0; j < 3; ++j)
-      gpuVertices[i * 3 + j] = bearVertexData[i * 6 + j];
-  std::memcpy(gpuIndices, bearIndices.data(),
-              bearIndices.size() * sizeof(bearIndices[0]));
+      gpuVertices[i * 3 + j] = bear.vertices[i * 6 + j];
+  std::memcpy(gpuIndices, bear.indices.data(),
+              bear.indices.size() * sizeof(bear.indices[0]));
 
   std::vector<glm::mat4> relativePositions;
-  glm::ivec3 dims = glm::ivec3((bearBBox.second - bearBBox.first) / vxlSize);
+  glm::ivec3 dims = glm::ivec3((bearBBox.getSize()) / vxlSize);
 
   int N = dims[0] * dims[1] * dims[2];
   unsigned char *gpuOutput;
@@ -292,16 +314,16 @@ int main(int argc, char *argp[]) {
 
   int blockSize = 256;
   int numBlocks = (N + blockSize - 1) / blockSize;
-  raycast<<<numBlocks, blockSize>>>(bearIndices.size(), gpuVertices, gpuIndices,
-                                    gpuOutput, dims[0], dims[1], dims[2],
-                                    bearBBox.first, vxlSize);
+  raycast<<<numBlocks, blockSize>>>(bear.indices.size(), gpuVertices,
+                                    gpuIndices, gpuOutput, dims[0], dims[1],
+                                    dims[2], bearBBox.min, vxlSize);
   cudaDeviceSynchronize();
 
   for (int i = 0; i < dims[0]; ++i) {
     for (int j = 0; j < dims[1]; ++j) {
       for (int k = 0; k < dims[2]; ++k) {
         glm::vec3 pos =
-            bearBBox.first + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * vxlSize;
+            bearBBox.min + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * vxlSize;
         if (gpuOutput[i * dims[1] * dims[2] + j * dims[2] + k] % 2)
           relativePositions.push_back(
               glm::scale(glm::translate(glm::mat4(1.0), pos),
@@ -346,9 +368,9 @@ int main(int argc, char *argp[]) {
   GLuint shader = compileShader(vertexShaderSrc.c_str(), fragmentShaderSrc);
 
   auto [bearVAO, bearVBO] =
-      bindModel(bearVertexData, bearIndices, bearMatrices);
+      bindModel(bear.vertices, bear.indices, bearMatrices);
   auto [ballVAO, ballVBO] =
-      bindModel(ballVertexData, ballIndices, relativePositions);
+      bindModel(ball.vertices, ball.indices, relativePositions);
   glm::mat4 projection = glm::perspective(
       glm::radians(60.0f), (float)g::SCR_WIDTH / g::SCR_HEIGHT, 0.1f, 1000.0f);
 
@@ -373,14 +395,14 @@ int main(int argc, char *argp[]) {
 
     if (showBearBalls & 0b01) {
       glBindVertexArray(bearVAO);
-      glDrawElementsInstanced(GL_TRIANGLES, bearIndices.size(), GL_UNSIGNED_INT,
-                              0, bearMatrices.size());
+      glDrawElementsInstanced(GL_TRIANGLES, bear.indices.size(),
+                              GL_UNSIGNED_INT, 0, bearMatrices.size());
     }
 
     if (showBearBalls & 0b10) {
       glBindVertexArray(ballVAO);
-      glDrawElementsInstanced(GL_TRIANGLES, ballIndices.size(), GL_UNSIGNED_INT,
-                              0, relativePositions.size());
+      glDrawElementsInstanced(GL_TRIANGLES, ball.indices.size(),
+                              GL_UNSIGNED_INT, 0, relativePositions.size());
     }
 
     glfwSwapBuffers(window);
