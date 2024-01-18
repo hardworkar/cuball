@@ -1,7 +1,0 @@
-{
-    "files.associations": {
-        "*.log_backup1": "log",
-        "*.cu": "cpp",
-        "chrono": "cpp"
-    }
-}
