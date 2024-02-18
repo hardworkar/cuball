@@ -20,14 +20,16 @@
 #include <stdio.h>
 #include <vector>
 
+using namespace glm;
+
 namespace g {
 const unsigned int SCR_WIDTH = 1920;
 const unsigned int SCR_HEIGHT = 1080;
-glm::vec3 cameraPos = glm::vec3(0.0f, -200.0f, 00.0f);
-glm::vec3 cameraTarget = glm::vec3(0.0f, 0.0f, 00.0f);
+vec3 cameraPos = vec3(0.0f, -200.0f, 00.0f);
+vec3 cameraTarget = vec3(0.0f, 0.0f, 00.0f);
 float aspect = (float)SCR_WIDTH / SCR_HEIGHT;
-glm::mat4 projection =
-    glm::perspective(glm::radians(60.0f), aspect, 0.1f, 1000.0f);
+mat4 projection =
+    perspective(radians(60.0f), aspect, 0.1f, 1000.0f);
 int discretization = 30;
 } // namespace g
 
@@ -63,44 +65,44 @@ const char *fragmentShaderSrc =
     "  FragColor = vec4(ambient + diffuse, 0.0);\n"
     "}\0";
 
-glm::mat4 getCameraView() {
-  glm::vec3 cameraDir = glm::normalize(g::cameraPos - g::cameraTarget);
-  glm::vec3 up = glm::vec3(0.0f, 0.0f, 1.0f);
-  glm::vec3 cameraRight = glm::normalize(glm::cross(up, cameraDir));
-  glm::vec3 cameraUp = glm::cross(cameraDir, cameraRight);
-  glm::mat4 view = glm::lookAt(g::cameraPos, g::cameraTarget, cameraUp);
+mat4 getCameraView() {
+  vec3 cameraDir = normalize(g::cameraPos - g::cameraTarget);
+  vec3 up = vec3(0.0f, 0.0f, 1.0f);
+  vec3 cameraRight = normalize(cross(up, cameraDir));
+  vec3 cameraUp = cross(cameraDir, cameraRight);
+  mat4 view = lookAt(g::cameraPos, g::cameraTarget, cameraUp);
   return view;
 }
 
 const float MAX_FLOAT = std::numeric_limits<float>::infinity();
 const float MIN_FLOAT = -std::numeric_limits<float>::infinity();
 
-float max3(const glm::vec3 &v) { return std::max(std::max(v.x, v.y), v.z); }
-float min3(const glm::vec3 &v) { return std::min(std::min(v.x, v.y), v.z); }
+float max3(const vec3 &v) { return std::max(std::max(v.x, v.y), v.z); }
+float min3(const vec3 &v) { return std::min(std::min(v.x, v.y), v.z); }
 
 struct Box3 {
   Box3()
-      : min(glm::vec3(MAX_FLOAT, MAX_FLOAT, MAX_FLOAT)),
-        max(glm::vec3(MIN_FLOAT, MIN_FLOAT, MIN_FLOAT)) {}
-  Box3(const glm::vec3 &iMin, const glm::vec3 &iMax) : min(iMin), max(iMax) {}
-  glm::vec3 getCenter() { return (max + min) / 2.0f; }
-  glm::vec3 getSize() { return max - min; }
-  void expandByPoint(const glm::vec3 &iPoint) {
+      : min(vec3(MAX_FLOAT, MAX_FLOAT, MAX_FLOAT)),
+        max(vec3(MIN_FLOAT, MIN_FLOAT, MIN_FLOAT)) {}
+  Box3(const vec3 &iMin, const vec3 &iMax) : min(iMin), max(iMax) {}
+  vec3 getCenter() { return (max + min) / 2.0f; }
+  vec3 getSize() { return max - min; }
+  void expandByPoint(const vec3 &iPoint) {
     for (int i = 0; i < 3; ++i) {
       min[i] = std::min(min[i], iPoint[i]);
       max[i] = std::max(max[i], iPoint[i]);
     }
   }
 
-  glm::vec3 min;
-  glm::vec3 max;
+  vec3 min;
+  vec3 max;
 };
 
 Box3 computeBBox(const std::vector<float> &verticesWithNormals) {
   Box3 out;
   for (int i = 0; i < verticesWithNormals.size() / 6; ++i) {
-    glm::vec3 vertex =
-        glm::vec3(verticesWithNormals[6 * i], verticesWithNormals[6 * i + 1],
+    vec3 vertex =
+        vec3(verticesWithNormals[6 * i], verticesWithNormals[6 * i + 1],
                   verticesWithNormals[6 * i + 2]);
     out.expandByPoint(vertex);
   }
@@ -133,7 +135,7 @@ Mesh importModel(const std::string &iFilename) {
       outMesh.vertices.push_back(mesh->mNormals[i][j]);
   }
   Box3 box = computeBBox(outMesh.vertices);
-  glm::vec3 bboxCenter = box.getCenter();
+  vec3 bboxCenter = box.getCenter();
   for (int i = 0; i < mesh->mNumVertices; ++i)
     for (int j = 0; j < 3; ++j)
       outMesh.vertices[6 * i + j] -= bboxCenter[j];
@@ -223,7 +225,7 @@ void processInput(GLFWwindow *window) {
   float phiDiff = (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) -
                   (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS);
   phi += phiDiff * 0.1;
-  g::cameraPos = glm::vec3(r * cos(phi), r * sin(phi), g::cameraPos.z);
+  g::cameraPos = vec3(r * cos(phi), r * sin(phi), g::cameraPos.z);
 
   static bool lastBState = true;
   bool currState = glfwGetKey(window, GLFW_KEY_B) == GLFW_PRESS;
@@ -234,7 +236,7 @@ void processInput(GLFWwindow *window) {
 
 struct OpenGLObject {
   GLuint vbo, vao, ebo, instanceVBO;
-  OpenGLObject(const Mesh &mesh, std::vector<glm::mat4> &models) {
+  OpenGLObject(const Mesh &mesh, std::vector<mat4> &models) {
     glGenBuffers(1, &vbo);
     glGenVertexArrays(1, &vao);
     glGenBuffers(1, &ebo);
@@ -268,9 +270,9 @@ struct OpenGLObject {
     glDeleteBuffers(1, &instanceVBO);
   }
 
-  void bindMatrices(std::vector<glm::mat4> &models) {
+  void bindMatrices(std::vector<mat4> &models) {
     glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(glm::mat4) * models.size(), &models[0],
+    glBufferData(GL_ARRAY_BUFFER, sizeof(mat4) * models.size(), &models[0],
                  GL_STATIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
@@ -287,32 +289,32 @@ struct OpenGLObject {
   }
 };
 
-__device__ bool rayTriangleIntersect(const glm::vec3 &orig,
-                                     const glm::vec3 &dir,
-                                     const glm::vec3 vert[3], float &t) {
-  glm::vec3 N = glm::cross(vert[1] - vert[0], vert[2] - vert[0]);
-  float NdotRayDirection = glm::dot(N, dir);
+__device__ bool rayTriangleIntersect(const vec3 &orig,
+                                     const vec3 &dir,
+                                     const vec3 vert[3], float &t) {
+  vec3 N = cross(vert[1] - vert[0], vert[2] - vert[0]);
+  float NdotRayDirection = dot(N, dir);
   if (fabs(NdotRayDirection) < 1e-6)
     return false;
 
-  float d = glm::dot(-N, vert[0]);
+  float d = dot(-N, vert[0]);
 
-  t = -(glm::dot(N, orig) + d) / NdotRayDirection;
+  t = -(dot(N, orig) + d) / NdotRayDirection;
   if (t < 0)
     return false;
 
-  glm::vec3 P = orig + t * dir;
+  vec3 P = orig + t * dir;
   for (int v = 0; v < 3; ++v) {
-    glm::vec3 C = glm::cross(vert[(v + 1) % 3] - vert[v], P - vert[v]);
-    if (glm::dot(N, C) < 0)
+    vec3 C = cross(vert[(v + 1) % 3] - vert[v], P - vert[v]);
+    if (dot(N, C) < 0)
       return false;
   }
   return true;
 }
 
 __global__ void raycast(size_t nIndices, float *vertices, unsigned int *indices,
-                        unsigned char *output, glm::ivec3 dims,
-                        glm::vec3 offset, float voxelSize) {
+                        unsigned char *output, ivec3 dims,
+                        vec3 offset, float voxelSize) {
   int index = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
   int n = dims[0] * dims[1] * dims[2];
@@ -321,15 +323,15 @@ __global__ void raycast(size_t nIndices, float *vertices, unsigned int *indices,
     int i = v / dims[1] / dims[2];
     int j = (v / dims[2]) % dims[1];
     int k = v % dims[2];
-    glm::vec3 pos = offset + (glm::vec3(i, j, k) + glm::vec3(0.5f)) * voxelSize;
+    vec3 pos = offset + (vec3(i, j, k) + vec3(0.5f)) * voxelSize;
 
-    glm::vec3 vert[3];
+    vec3 vert[3];
     for (int idx = 0; idx < nIndices; idx += 3) {
       for (int verti = 0; verti < 3; ++verti)
         for (int vertj = 0; vertj < 3; ++vertj)
           vert[verti][vertj] = vertices[3 * indices[idx + verti] + vertj];
       float t;
-      output[v] += rayTriangleIntersect(pos, glm::vec3(0, 0, 1), vert, t);
+      output[v] += rayTriangleIntersect(pos, vec3(0, 0, 1), vert, t);
     }
   }
 }
@@ -349,58 +351,58 @@ struct cuMesh {
 };
 
 struct RigidBody {
-  glm::vec3 pos = glm::vec3(0, 0, 0); // center of mass
-  glm::quat quat = glm::quat(1, 0, 0, 0);
-  glm::vec3 V = glm::vec3(0, 0, 0);
-  glm::vec3 W = glm::vec3(0, 0, 0);
+  vec3 pos = vec3(0, 0, 0); // center of mass
+  quat q = quat(1, 0, 0, 0);
+  vec3 V = vec3(0, 0, 0);
+  vec3 W = vec3(0, 0, 0);
 
-  std::vector<glm::vec3> getRelativePositions(
-      const std::vector<glm::vec3> &initialRelativePositions) const {
-    std::vector<glm::vec3> relativePositions;
+  std::vector<vec3> getRelativePositions(
+      const std::vector<vec3> &initialRelativePositions) const {
+    std::vector<vec3> relativePositions;
     std::transform(initialRelativePositions.cbegin(),
                    initialRelativePositions.cend(),
                    std::back_inserter(relativePositions),
-                   [this](const glm::vec3 &initialRelativePos) {
-                     return quat * initialRelativePos * glm::conjugate(quat);
+                   [this](const vec3 &initialRelativePos) {
+                     return q * initialRelativePos * conjugate(q);
                    });
     return relativePositions;
   }
 
-  std::vector<glm::vec3>
-  getPositions(const std::vector<glm::vec3> &relativePositions) const {
-    std::vector<glm::vec3> positions;
+  std::vector<vec3>
+  getPositions(const std::vector<vec3> &relativePositions) const {
+    std::vector<vec3> positions;
     std::transform(
         relativePositions.cbegin(), relativePositions.cend(),
         std::back_inserter(positions),
-        [this](const glm::vec3 &relativePos) { return pos + relativePos; });
+        [this](const vec3 &relativePos) { return pos + relativePos; });
     return positions;
   }
 
-  glm::mat4 getWorldMatrix() {
-    return glm::translate(glm::mat4(1.0), pos) * glm::toMat4(quat);
+  mat4 getWorldMatrix() {
+    return translate(mat4(1.0), pos) * toMat4(q);
   }
 };
 
-std::vector<glm::mat4>
-getParticleMatrices(const std::vector<glm::vec3> &positions, float ballScale) {
-  std::vector<glm::mat4> matrices;
+std::vector<mat4>
+getParticleMatrices(const std::vector<vec3> &positions, float ballScale) {
+  std::vector<mat4> matrices;
   std::transform(positions.cbegin(), positions.cend(),
                  std::back_inserter(matrices),
-                 [ballScale](const glm::vec3 &position) {
-                   return glm::scale(glm::translate(glm::mat4(1.0), position),
-                                     glm::vec3(ballScale));
+                 [ballScale](const vec3 &position) {
+                   return scale(translate(mat4(1.0), position),
+                                     vec3(ballScale));
                  });
   return matrices;
 }
 
-std::vector<glm::vec3>
+std::vector<vec3>
 getVelocities(const RigidBody &body,
-              const std::vector<glm::vec3> &relativePositions) {
-  std::vector<glm::vec3> velocities;
+              const std::vector<vec3> &relativePositions) {
+  std::vector<vec3> velocities;
   std::transform(relativePositions.cbegin(), relativePositions.cend(),
                  std::back_inserter(velocities),
-                 [&body](const glm::vec3 &relativePos) {
-                   return body.V + glm::cross(body.W, relativePos);
+                 [&body](const vec3 &relativePos) {
+                   return body.V + cross(body.W, relativePos);
                  });
   return velocities;
 }
@@ -421,7 +423,7 @@ int main(int argc, char *argp[]) {
 
   cuMesh cuBear(bear);
 
-  glm::ivec3 dims = glm::ivec3(bearBBox.getSize() / voxelSize);
+  ivec3 dims = ivec3(bearBBox.getSize() / voxelSize);
 
   int N = dims[0] * dims[1] * dims[2];
   unsigned char *voxels;
@@ -435,43 +437,43 @@ int main(int argc, char *argp[]) {
                                     voxelSize);
   cudaDeviceSynchronize();
 
-  std::vector<glm::vec3> particleInitialRelativePositions;
+  std::vector<vec3> particleInitialRelativePositions;
   for (int i = 0; i < dims[0]; ++i) {
     for (int j = 0; j < dims[1]; ++j) {
       for (int k = 0; k < dims[2]; ++k) {
         if (voxels[i * dims[1] * dims[2] + j * dims[2] + k] % 2 == 0)
           continue;
-        glm::vec3 pos = bearBBox.min +
-                        (glm::vec3(i, j, k) + glm::vec3(0.5f)) * voxelSize -
+        vec3 pos = bearBBox.min +
+                        (vec3(i, j, k) + vec3(0.5f)) * voxelSize -
                         bearBBox.getCenter();
         particleInitialRelativePositions.push_back(pos);
       }
     }
   }
 
-  std::vector<glm::vec3> particleRelativePositions;
-  std::vector<glm::vec3> particlePositions;
+  std::vector<vec3> particleRelativePositions;
+  std::vector<vec3> particlePositions;
 
-  std::vector<glm::mat4> bearMatrices;
-  std::vector<glm::mat4> mergedParticleMatrices;
+  std::vector<mat4> bearMatrices;
+  std::vector<mat4> mergedParticleMatrices;
 
-  std::vector<RigidBody> bears = {{.pos = glm::vec3(0, 0, 0),
-                                   .quat = glm::quat(1, 0, 0, 0),
-                                   .V = glm::vec3(0, 0, 0),
-                                   .W = glm::vec3(0, 0, 0)},
-                                  {.pos = glm::vec3(50, 0, 0),
-                                   .quat = glm::quat(1, 0, 0, 0),
-                                   .V = glm::vec3(0, 0, 0),
-                                   .W = glm::vec3(0, 0, 0)},
-                                  {.pos = glm::vec3(-50, 0, 0),
-                                   .quat = glm::quat(1, 0, 0, 0),
-                                   .V = glm::vec3(0, 0, 0),
-                                   .W = glm::vec3(0, 0, 0)}};
+  std::vector<RigidBody> bears = {{.pos = vec3(0, 0, 0),
+                                   .q = quat(1, 0, 0, 0),
+                                   .V = vec3(0, 0, 0),
+                                   .W = vec3(0, 0, 0)},
+                                  {.pos = vec3(50, 0, 0),
+                                   .q = quat(1, 0, 0, 0),
+                                   .V = vec3(0, 0, 0),
+                                   .W = vec3(0, 0, 0)},
+                                  {.pos = vec3(-50, 0, 0),
+                                   .q = quat(1, 0, 0, 0),
+                                   .V = vec3(0, 0, 0),
+                                   .W = vec3(0, 0, 0)}};
   for (auto freddy : bears) {
     particleRelativePositions =
         freddy.getRelativePositions(particleInitialRelativePositions);
     particlePositions = freddy.getPositions(particleRelativePositions);
-    std::vector<glm::mat4> particleMatrices =
+    std::vector<mat4> particleMatrices =
         getParticleMatrices(particlePositions, ballScale);
 
     mergedParticleMatrices.insert(mergedParticleMatrices.end(),
@@ -490,15 +492,15 @@ int main(int argc, char *argp[]) {
     glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    glm::mat4 view = getCameraView();
+    mat4 view = getCameraView();
 
     glUseProgram(shader);
     glUniformMatrix4fv(glGetUniformLocation(shader, "projection"), 1, GL_FALSE,
-                       glm::value_ptr(g::projection));
+                       value_ptr(g::projection));
     glUniformMatrix4fv(glGetUniformLocation(shader, "view"), 1, GL_FALSE,
-                       glm::value_ptr(view));
+                       value_ptr(view));
     glUniform3fv(glGetUniformLocation(shader, "lightPos"), 1,
-                 glm::value_ptr(g::cameraPos));
+                 value_ptr(g::cameraPos));
 
     ballGL.bindMatrices(mergedParticleMatrices);
 
